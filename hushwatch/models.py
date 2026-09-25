@@ -131,7 +131,10 @@ class DataBasis:
     future_timestamps: int = 0
     sampled: bool = False
     truncated: bool = False  # caps hit (max events, max keys, max buckets)
-    partial_failures: list[str] = field(default_factory=list)  # shard failures, timeouts, auth errors
+    # shard failures, timeouts, auth errors, unreadable files; Message when a translation exists
+    partial_failures: list[Message | str] = field(default_factory=list)
+    excluded_by_window: int = 0  # events outside --since/--until (read but not analyzed)
+    skipped_files: list[str] = field(default_factory=list)  # files in input dirs not read (unknown extension...)
     warnings: list[Message | str] = field(default_factory=list)
     not_evaluated: list[str] = field(default_factory=list)  # analyses the input could not support
 
