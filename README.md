@@ -57,11 +57,11 @@ hushwatch report alerts.json --lang es --redact -f html -o informe.html
 
 | Domain | What you get | Example |
 |---|---|---|
-| **Noise** | Scoped, gated, backtested tuning suggestions — plus ready-to-review Wazuh rules | *"Rule 60106 on srv-backup-01 for `svc_backup` = 34% of the rule, every night for 21 days, FP ≥ 87% (n=42). Hiding it removes 157 alerts/day and no high-severity alert."* |
+| **Noise** | Scoped, gated, backtested tuning suggestions — plus ready-to-review Wazuh rules | *"Rule 60106 on srv-backup-01 for `svc_backup` = 34% of the rule, every night for 21 days. Hiding it removes 157 alerts/day and no high-severity alert."* |
 | | Noisy rules that must **not** be tuned, and why | *"5710 from 203.0.113.50: first seen 2 days ago, co-occurs with brute-force rule 5712 (level 10) → investigate, or restrict exposure."* |
 | **Silence** | Sources, channels and rules that went quiet — calibrated, grouped by root cause | *"dc02 stopped sending 30 h ago, 20 min after 'audit log cleared' (1102) → possible defense evasion (T1070.001)."* |
 | | Fields that disappeared | *"fw-edge-01 lost `data.dstport` on 2026-09-20 (100% → 0%) — every rule using it is blind."* |
-| **Coverage** | Telemetry that was **never** collected | *"srv-app-01 never sent Sysmon; 12 of its 13 Windows peers do."* · *"srv-app-02 logs 4624 but never 4688: process-creation auditing is off."* |
+| **Coverage** | Telemetry that was **never** collected | *"srv-app-01 never sent Sysmon; its Windows peers do."* · *"srv-app-02 logs 4624 but never 4688: process-creation auditing is off."* |
 | **Pipeline** | Agents disconnected / alive-but-silent, manager drops, lag, clock skew | *"srv-mon-01 keepalive is fresh but no events for 3 days: collection is broken."* |
 | **Tuning debt** | Risky EXISTING suppressions in your `local_rules.xml` | *"Rule 100010 mutes all of 5716 (no condition) and starves correlation rule 5720."* |
 
@@ -76,6 +76,7 @@ hushwatch report alerts.json --lang es --redact -f html -o informe.html
   * sensitive MITRE tactics;
   * public IPs (the answer is "restrict exposure", not a mute);
   * beacon-like periodicity;
+  * interpreters and system binaries (PowerShell, cmd, rundll32...) are never enough on their own;
   * rules other correlation rules depend on;
   * true-positive dispositions.
 * Every suggestion is **backtested**: it is replayed over the whole window with exactly the semantics of the
