@@ -1,0 +1,112 @@
+<!-- SYNTHETIC local rules for hushwatch audit tests: a catalogue of good and bad tuning practices. -->
+<!-- Hosts, users and networks are fictitious (example domains, RFC 1918 ranges). -->
+
+<var name="SCANNER_NET">10.20.0.0/24</var>
+
+<group name="local,syslog,sshd,">
+
+  <!-- Whole-rule mute of an attack rule that feeds correlation: the worst pattern. -->
+  <rule id="100001" level="0">
+    <if_sid>5710</if_sid>
+    <description>Ignore invalid user noise</description>
+  </rule>
+
+  <!-- Unanchored substring on free log text only. -->
+  <rule id="100002" level="0">
+    <if_sid>5716</if_sid>
+    <match>backup</match>
+    <description>Mute failed logins of the backup job</description>
+  </rule>
+
+  <!-- Internal scanner subnet (variable), still breaks the brute-force correlation on 5710. -->
+  <rule id="100003" level="0">
+    <if_sid>5710</if_sid>
+    <srcip>$SCANNER_NET</srcip>
+    <description>Internal vulnerability scanner, owner soc, expires 2027-03-31</description>
+  </rule>
+</group>
+
+<group name="local,windows,">
+  <!-- no_log child of the logon-failure rule, on an unanchored username only. -->
+  <rule id="100005" level="5">
+    <if_sid>60122</if_sid>
+    <field name="win.eventdata.targetUserName">admin</field>
+    <options>no_log</options>
+    <description>Hide admin logon failures</description>
+  </rule>
+
+  <!-- PCRE2 with an unanchored top-level alternative. -->
+  <rule id="100006" level="1">
+    <if_sid>60106</if_sid>
+    <location>^(dc01)</location>
+    <field name="win.eventdata.image" type="pcre2">(?i)^C:\\Tools\\agent\.exe$|updater\.exe</field>
+    <description>Tools agent logons on dc01</description>
+  </rule>
+</group>
+
+<group name="local,pam,">
+  <!-- A well-scoped suppression: anchored, stable anchors, documented, not expired. -->
+  <rule id="100010" level="2">
+    <if_sid>5501</if_sid>
+    <hostname type="pcre2">^srv-backup-01\.example$</hostname>
+    <user type="pcre2">^svc_backup$</user>
+    <description>Nightly backup sessions of svc_backup on srv-backup-01. Owner soc, ticket CHG-0001, expires 2027-06-30</description>
+  </rule>
+
+  <!-- Expired suppression. -->
+  <rule id="100011" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>^srv-web-01.example$</hostname>
+    <description>Maintenance window mute, expires 2026-01-31</description>
+  </rule>
+
+  <!-- No description (only problem). -->
+  <rule id="100012" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>^srv-web-02.example$</hostname>
+  </rule>
+
+  <!-- Frequency rule 5557 correlates on 5503 through if_sid. -->
+  <rule id="100013" level="0">
+    <if_sid>5503</if_sid>
+    <hostname>^srv-app-01.example$</hostname>
+    <description>App server PAM failures are expected, expires 2026-12-31</description>
+  </rule>
+</group>
+
+<group name="syslog,sshd,">
+  <!-- Overwrite of a stock correlation rule: lower level, weaker threshold, longer quiet period. -->
+  <rule id="5712" level="6" frequency="30" timeframe="120" ignore="600" overwrite="yes">
+    <if_matched_sid>5710</if_matched_sid>
+    <same_source_ip />
+    <description>sshd: brute force (tuned down)</description>
+    <group>authentication_failures,</group>
+  </rule>
+</group>
+
+<group name="local,">
+  <!-- if_group mute of every successful-authentication rule on one host. -->
+  <rule id="100050" level="0">
+    <if_group>authentication_success</if_group>
+    <hostname>^dc01.corp.example$</hostname>
+    <description>Domain controller logons are too chatty</description>
+  </rule>
+
+  <!-- A detection (escalation), not a suppression: must not be flagged. -->
+  <rule id="100030" level="12">
+    <if_sid>5715</if_sid>
+    <user type="pcre2">^root$</user>
+    <description>Direct root login accepted</description>
+  </rule>
+</group>
+
+<group name="local,hushwatch,">
+  <!-- hushwatch fingerprint=0a1b2c3d created=2026-09-01 expires=2026-12-24 review_required=no -->
+  <rule id="100100" level="3">
+    <if_sid>5503</if_sid>
+    <location type="pcre2">^\x{28}srv\x{2d}db\x{2d}01\x{29}\x{20}</location>
+    <user type="pcre2">^svc_report$</user>
+    <description>hushwatch: demote 5503 for agent.name=srv-db-01, data.srcuser=svc_report (fp:0a1b2c3d, expires 2026-12-24)</description>
+    <group>pam,syslog,authentication_failed,hushwatch_tuned,</group>
+  </rule>
+</group>

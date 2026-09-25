@@ -1,0 +1,4 @@
+when;box;sig;sig_name;sev;client;account
+2026-09-10 10:00:00;srv-db-01.example;S-100;Backup job failed;medium;10.0.2.10;svc_backup
+2026-09-10 11:30:00;srv-db-01.example;S-100;Backup job failed;medium;10.0.2.10;svc_backup
+2026-09-10 12:00:00;srv-app-02.example;S-200;"Login failure; bad password";8;203.0.113.9;alice

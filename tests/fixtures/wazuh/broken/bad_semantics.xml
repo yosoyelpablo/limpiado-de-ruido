@@ -1,0 +1,63 @@
+<!-- SYNTHETIC: well-formed XML that wazuh-analysisd would reject. -->
+<group name="local,">
+  <rule id="100300">
+    <decoded_as>hw_app</decoded_as>
+    <description>No level attribute.</description>
+  </rule>
+
+  <rule id="100301" level="3" severity="high">
+    <decoded_as>hw_app</decoded_as>
+    <description>Unknown attribute.</description>
+  </rule>
+
+  <rule id="100302" level="3">
+    <if_sid>100301</if_sid>
+    <field name="srcip">^10\.</field>
+    <description>field on a static field.</description>
+  </rule>
+
+  <rule id="100303" level="3">
+    <if_sid>100301</if_sid>
+    <options>no_log,no_email_alert</options>
+    <description>Two values in one options element.</description>
+  </rule>
+
+  <rule id="100304" level="3">
+    <if_sid>100301</if_sid>
+    <srcip>10.0.0.300</srcip>
+    <description>Invalid IP.</description>
+  </rule>
+
+  <rule id="100305" level="3">
+    <if_sid>100301</if_sid>
+    <frobnicate>yes</frobnicate>
+    <description>Unknown element.</description>
+  </rule>
+
+  <rule id="abc" level="3">
+    <decoded_as>hw_app</decoded_as>
+    <description>Invalid id.</description>
+  </rule>
+
+  <rule id="100306" level="99">
+    <decoded_as>hw_app</decoded_as>
+    <description>Invalid level.</description>
+  </rule>
+
+  <rule id="100307" level="10" frequency="$NOT_DEFINED" timeframe="60">
+    <if_matched_sid>100301</if_matched_sid>
+    <description>Frequency from an undefined variable.</description>
+  </rule>
+
+  <rule id="100308" level="3">
+    <if_sid>57x0</if_sid>
+    <description>Bad if_sid list.</description>
+  </rule>
+</group>
+
+<group name="empty,">
+</group>
+
+<decoder name="hw_app">
+  <prematch>^hw_app: </prematch>
+</decoder>

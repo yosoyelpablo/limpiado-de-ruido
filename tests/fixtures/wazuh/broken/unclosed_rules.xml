@@ -1,0 +1,21 @@
+<!-- SYNTHETIC: one broken group between two good ones. -->
+<group name="good,">
+  <rule id="100400" level="3">
+    <decoded_as>hw_app</decoded_as>
+    <description>Synthetic good rule one.</description>
+  </rule>
+</group>
+
+<group name="bad,">
+  <rule id="100401" level="3">
+    <decoded_as>hw_app</decoded_as>
+    <description>Synthetic rule whose description is never closed
+  </rule>
+</group>
+
+<group name="also_good,">
+  <rule id="100402" level="4">
+    <decoded_as>hw_app</decoded_as>
+    <description>Synthetic good rule two.</description>
+  </rule>
+</group>

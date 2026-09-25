@@ -1,0 +1,8 @@
+<!-- SYNTHETIC: CDATA is valid XML but Wazuh's os_xml reads "<!" as a comment start (analysisd fails). -->
+<group name="hw,">
+  <rule id="100600" level="3">
+    <decoded_as>hw_app</decoded_as>
+    <match><![CDATA[^Failed <password>]]></match>
+    <description>Synthetic rule using CDATA.</description>
+  </rule>
+</group>

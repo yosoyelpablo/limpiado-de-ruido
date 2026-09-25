@@ -1,0 +1,20 @@
+<!--
+  SYNTHETIC test ruleset for hushwatch (not the Wazuh ruleset).
+  Mimics the structure of a stock "rules_config" file: a file-scoped variable and a generic syslog base rule.
+-->
+
+<var name="HW_TROUBLE_WORDS">segfault|panic|out of memory|i/o error</var>
+
+<group name="syslog,">
+  <rule id="1001" level="0" noalert="1">
+    <category>syslog</category>
+    <description>Synthetic base for every syslog event.</description>
+  </rule>
+
+  <rule id="1002" level="2">
+    <if_sid>1001</if_sid>
+    <match>$HW_TROUBLE_WORDS</match>
+    <options>no_email_alert</options>
+    <description>Synthetic: a system component reported trouble.</description>
+  </rule>
+</group>

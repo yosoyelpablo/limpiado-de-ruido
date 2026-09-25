@@ -1,0 +1,55 @@
+# hushwatch example configuration.
+# Secrets are ALWAYS referenced as ${ENV_VAR}; never write them here. chmod 600 this file anyway.
+
+defaults:
+  timezone: America/Argentina/Buenos_Aires   # IANA name; used for hour-of-day baselines (DST-safe)
+  triage_level: 7          # alerts at/above this level reach your analysts
+  high_level: 10           # "high" alerts: never hidden by a suggestion, used for co-occurrence checks
+  max_tunable_level: 9     # rules above this level are never proposed for tuning
+  internal_networks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+  trusted_entities:        # known-benign automation that may anchor a scoped suppression
+    user: [svc_backup, svc_monitoring]
+    data.srcip: [10.20.0.15]            # internal vulnerability scanner
+  criticality:             # agent name globs -> tier (critical / standard / low)
+    critical: ["dc*", "fw-*"]
+    low: ["lap-*", "vdi-*"]
+  sla: {critical: 4h, standard: 24h, low: 72h}   # how fast silence must be detectable
+  expectations:
+    - name: windows servers
+      match: {platform: windows, name: "srv-*"}
+      log_sources: [Security, System, Microsoft-Windows-Sysmon/Operational]
+  calendar:
+    - {start: 2026-12-24, end: 2026-12-26, reason: holidays}
+  noise:
+    minutes_per_alert: [1, 5]
+  silence:
+    baseline: 14d
+    alarm_budget: 0.05     # expected false silence alarms per run, across all sources
+
+tenants:
+  acme:
+    inputs:
+      - type: file
+        path: /var/ossec/logs/alerts/alerts.json
+    ruleset_dirs: [/var/ossec/ruleset/rules, /var/ossec/etc/rules]
+    wazuh_api:
+      url: https://wazuh-manager.acme.example:55000
+      username: ${ACME_WAZUH_API_USER}
+      password: ${ACME_WAZUH_API_PASSWORD}
+      ca_cert: /etc/hushwatch/acme-root-ca.pem
+    notify:
+      - type: webhook
+        url: ${ACME_WEBHOOK_URL}
+
+  globex:
+    timezone: Europe/Madrid
+    inputs:
+      - type: indexer
+        url: https://indexer.globex.example:9200
+        index: wazuh-alerts-*
+        username: ${GLOBEX_INDEXER_USER}
+        password: ${GLOBEX_INDEXER_PASSWORD}
+        ca_cert: /etc/hushwatch/globex-root-ca.pem
+    notify:
+      - type: slack
+        url: ${GLOBEX_SLACK_WEBHOOK}
