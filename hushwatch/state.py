@@ -452,7 +452,7 @@ def _writable_by_anyone(path: Path, st: os.stat_result) -> bool:
         return False
     if st.st_mode & stat.S_IWOTH:
         return True
-    if st.st_uid in (os.geteuid(), 0):
+    if st.st_uid in (_euid(), 0):
         return False
     try:
         parent = os.stat(path.parent)
@@ -1823,7 +1823,7 @@ def _check_private_dir(directory: Path) -> None:
     shown = Entity("file", str(directory))
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise StateError(M("state.error.shared_dir", path=shown))
-    uid = os.geteuid()
+    uid = _euid()
     if st.st_uid not in (uid, 0):
         raise StateError(M("state.error.foreign_dir", path=shown))
 
@@ -1898,3 +1898,9 @@ __all__ = [
     "load_accept_file",
     "parse_accept",
 ]
+
+
+def _euid() -> int:
+    """Effective uid on POSIX; -1 elsewhere (os.geteuid does not exist on Windows)."""
+    geteuid = getattr(os, "geteuid", None)
+    return int(geteuid()) if geteuid is not None else -1

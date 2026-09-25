@@ -225,7 +225,9 @@ class Dispositions:
     def from_lines(cls, lines: Iterable[str], *, tenant: str | None = None) -> Dispositions:
         """Parse CSV text lines (first line = header)."""
         result = cls()
-        reader = csv.reader(lines)
+        # NUL bytes: Python 3.10's csv module rejects them ("line contains NUL") while 3.11+ keeps them; drop them
+        # first so every supported version parses the same file the same way (no SIEM id contains NUL).
+        reader = csv.reader(line.replace("\x00", "") for line in lines)
         header: list[str | None] | None = None
         while True:
             try:

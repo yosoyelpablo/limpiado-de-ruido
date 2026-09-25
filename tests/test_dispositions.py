@@ -141,7 +141,7 @@ def test_hostile_csv_content_does_not_crash() -> None:
     )
     disp = _load(text)
     assert disp.verdict_for_alert("a1") == "fp"
-    assert disp.verdict_for_alert("a2\x00") == "tp"
+    assert disp.verdict_for_alert("a2") == "tp"  # NUL dropped consistently on every Python version
     assert disp.verdict_for_alert("a3,with,commas") == "btp"
     assert disp.verdict_for_alert("a5") == "fp"
     assert disp.verdict_for_alert("a4") is None

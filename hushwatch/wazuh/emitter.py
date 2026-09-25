@@ -1225,7 +1225,7 @@ def _prepare_dir(out_dir: Path, targets: Sequence[Path], overwrite: bool, warnin
         # Whoever can write to the directory (or owns it) can swap the rules between now and the deployment;
         # that is an attacker-authored local_rules.xml. Refuse; only warn when others can merely look.
         info = out_dir.stat()
-        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        if info.st_uid != _euid() or info.st_mode & 0o022:
             raise EmitError(M("wazuh.emit.err.out_dir_unsafe", path=Entity("file", str(out_dir))))
         if info.st_mode & 0o077:
             warnings.append(M("wazuh.emit.warn.dir_mode", path=Entity("file", str(out_dir))))
@@ -1399,3 +1399,9 @@ def emit_suppressions(
     result.review_required = [plan.rule_id for plan in plans if plan.review]
     result.warnings = warnings
     return result
+
+
+def _euid() -> int:
+    """Effective uid on POSIX; -1 elsewhere (os.geteuid does not exist on Windows)."""
+    geteuid = getattr(os, "geteuid", None)
+    return int(geteuid()) if geteuid is not None else -1
