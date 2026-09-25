@@ -17,7 +17,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, TypeVar, get_type_hints
+from types import UnionType
+from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -412,10 +413,15 @@ def _build(cls: type[T], data: Any, where: str) -> T:
 
 
 def _coerce(hint: Any, value: Any, where: str) -> Any:
-    origin = getattr(hint, "__origin__", None)
-    args: tuple[Any, ...] = tuple(getattr(hint, "__args__", ()))
+    origin = get_origin(hint)
+    args: tuple[Any, ...] = tuple(get_args(hint))
     if value is None:
         return None
+    if origin in (Union, UnionType):  # Optional[X] / X | None (UnionType has no __origin__: use get_origin)
+        inner = [a for a in args if a is not type(None)]
+        if len(inner) != 1:
+            raise ConfigError(f"{where}: unsupported type")
+        return _coerce(inner[0], value, where)
     if hint is timedelta:
         try:
             return parse_duration(value)
@@ -446,9 +452,6 @@ def _coerce(hint: Any, value: Any, where: str) -> Any:
         if not isinstance(value, Mapping):
             raise ConfigError(f"{where}: expected a mapping")
         return {str(k): _coerce(args[1], v, f"{where}.{k}") if args else v for k, v in value.items()}
-    if origin is not None and type(None) in args:  # Optional[X] / X | None
-        inner = [a for a in args if a is not type(None)]
-        return _coerce(inner[0], value, where) if len(inner) == 1 else value
     if hint is bool:
         if not isinstance(value, bool):
             raise ConfigError(f"{where}: expected true/false")
@@ -458,6 +461,8 @@ def _coerce(hint: Any, value: Any, where: str) -> Any:
             raise ConfigError(f"{where}: expected a number")
         return hint(value)
     if hint is str:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ConfigError(f"{where}: expected a string")
         return str(value)
     return value
 
