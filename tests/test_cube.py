@@ -332,3 +332,37 @@ def test_precursors_merge() -> None:
     a.merge(b)
     assert [p.code for p in a.precursors_for("dc01.corp.example")] == ["win_1102", "win_4719"]
     assert [p.agent for p in a.precursors] == ["dc01.corp.example", "dc01.corp.example"]
+
+
+def test_spoofed_hostnames_cannot_starve_rules_and_log_sources() -> None:
+    """Syslog hostnames reach the cube as agents and are attacker-controlled: a flood of fake hosts used to take the
+    whole key cap, so a rule or log source that appeared afterwards was never tracked (its silence unknowable)."""
+    cube = CubeCollector(tenant(), max_keys=1000)
+    for i in range(2000):
+        cube.add(ev(T0, agent=f"spoof-{i}", ls="syslog", rule="2501"))
+    cube.add(ev(T0 + timedelta(hours=1), agent="dc01.corp.example", ls="Security", rule="60106"))
+    assert cube.truncated
+    assert cube.has("rule", ("60106",)) and cube.has("log_source", ("Security",))
+    assert cube.dropped_events["agent"] > 0 and cube.dropped_events["rule"] == 0
+    assert cube.n_keys() <= 1001
+    host_keys = len(cube.keys("agent")) + len(cube.keys("agent_log_source"))
+    assert host_keys <= 900  # the last 10% of the cap is kept for non-host keys
+    # the indexer path and merges follow the same rule
+    other = CubeCollector(tenant(), max_keys=1000)
+    for i in range(1200):
+        other.add_count("agent", (f"spoof-{i}",), H0, 1)
+    other.add_count("rule", ("5710",), H0, 3)
+    assert other.has("rule", ("5710",))
+    merged = CubeCollector(tenant(), max_keys=1000)
+    merged.merge(cube)
+    assert merged.has("rule", ("60106",))
+
+
+def test_side_tables_are_bounded_globally() -> None:
+    cube = CubeCollector(tenant(), max_keys=10, max_rule_pairs=128, max_event_codes=128)
+    for i in range(400):
+        cube.add_rule_source("60106", f"h{i}", "Security")
+        cube.add_event_code("dc01", "Security", str(i))
+    assert len(cube.rule_sources("60106")[0]) <= cube.max_side_entries
+    assert cube.rule_sources("60106")[1] is True  # overflow is reported
+    assert len(cube.event_codes("dc01", "Security")) <= cube.max_side_entries

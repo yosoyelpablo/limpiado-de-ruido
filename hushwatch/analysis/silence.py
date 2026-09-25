@@ -11,41 +11,54 @@ green*. For every key of the :class:`~hushwatch.analysis.cube.CubeCollector`:
    ends when it went quiet, so an ongoing outage is never learned as normal.
 3. **Model.** ``mu(t) = scale × shape(how(t)) / 24``: ``shape`` is the key's hour-of-week profile when the
    baseline has ≥ 21 days, otherwise an hour-of-day profile times a day-of-week factor (so a 14-day baseline does
-   not flag every weekend). The profile is shrunk toward the peer profile of its level with weight
-   ``m / (n + m)``, ``m = 48``. ``scale`` is the 10% trimmed mean of (deseasonalised) daily totals. Counts are
-   negative binomial with size ``k`` from the method of moments on baseline residuals (degrees-of-freedom
-   corrected), clipped to [0.5, 1000] and pooled over the level for sparse keys; a day-level size ``k_day``
-   captures day-to-day swings and the uncertainty of ``scale`` itself (``n_eff``) widens every test.
+   not flag every weekend); a weekday factor is learnt from ~2 days, so its deviation from the key's own
+   weekday/weekend split is shrunk. The profile is shrunk toward the peer profile of its level with weight
+   ``m / (n + m)``, ``m = 48``; one-off spike days (> 3× the median day, not repeated on that weekday) are
+   winsorized first. With < 21 days a second, per-slot hour-of-week model (the separable rate as a one-event gamma
+   prior) catches weekly batch jobs the separable profile misreads. ``scale`` is the 10% trimmed mean of
+   (deseasonalised) daily totals. Counts are negative binomial with size ``k`` from the method of moments on
+   baseline residuals (degrees-of-freedom corrected), clipped to [0.5, 1000] and pooled over the level for sparse
+   keys. Day-to-day swings: the larger of the method-of-moments and a robust log-scale (MAD) estimate, inflated for
+   the profile having been fitted to those same few days (``(1 + p/n) / (1 - p/n)``), give ``k_day`` and a lognormal
+   ``day_sigma``; the uncertainty of ``scale`` itself (``n_eff``) widens every test.
 4. **SILENT** (also gaps and rule-dark): ``P0 = Π_b (1 + mu_b/k)^-k`` over the hour buckets since the last event
-   (partial buckets weighted). The ±1 h tolerance is applied by taking the *largest* P0 over the profile shifted
-   by −1/0/+1 h (at least as conservative as ±1 h smoothing, and it does not expect events an hour away from a
-   UTC-scheduled job that moved with DST); the scale-uncertainty predictive ``(1 + Λ/n_eff)^-n_eff`` is a floor.
-   Keys that are not always-on (laptops, business-hours sources) get a day-level "day off" mixture whose rate is
-   learned from their history with an empirical-Bayes prior from their peers (same level, tier and duty class):
-   a laptop that stays home is not an outage, while always-on sources keep hour-level sensitivity. Alarm when
-   ``P0 < alpha_eff = alarm_budget / keys_evaluated`` (a zero budget is clamped to 1e-6, never "detection off").
+   (partial buckets weighted), integrated per local day over the lognormal day multiplier (Gauss-Hermite). The ±1 h
+   tolerance is the *largest* P0 over the profile shifted by −1/0/+1 h and over both models; the scale-uncertainty
+   predictive ``(1 + Λ/n_eff)^-n_eff`` is a floor. Bursty sources (on/off applications, clustered alerts) keep
+   quiet once quiet: a burstiness ``theta`` estimated by maximum likelihood from the key's own baseline lulls makes
+   each hour of a gap cost ``theta`` times its NB cost. Keys that are not always-on (laptops, business-hours
+   sources) get a day-level "day off" mixture: the first day off with a rate learnt from their history and an
+   empirical-Bayes prior from their peers (same tier, weekend-active or not), further days off with the peers'
+   day-off persistence curve (vacations). Critical keys use their own record only, and an agent the Wazuh API
+   shows connected right now gets no day-off tolerance. Alarm when ``P0 < alpha_eff = alarm_budget /
+   keys_evaluated`` (a zero budget is clamped to 1e-6, never "detection off").
 5. **DROP**: window ``window`` grown by whole days until ``expected ≥ 20`` spread over ≥ 6 effective hours (max
-   7 days; the unsmoothed profile, most conservative ±1 h alignment); NB lower tail with a size combining hourly,
-   daily and scale uncertainty, mixed over "low days" for sources that skip days; alarm when ``p < alpha_eff``
-   AND ``observed/expected < drop_ratio``. A source that still trickles is a DROP even if its sparse gaps are also
-   significant. The drop start is the maximum-likelihood change point. **DECAY**: last 7 days vs an earlier
-   reference (up to 28 days), both medians and totals below 0.5 (per-weekday expectations), same NB test.
+   7 days; the unsmoothed profile, the smaller of both models, most conservative ±1 h alignment); NB lower tail
+   with a size combining hourly, daily and scale uncertainty, mixed over "low days" for sources that skip days. The
+   same test on the part since the maximum-likelihood change point (Bonferroni-corrected for the candidate points)
+   catches a sharp drop hours earlier; alarm when ``p < alpha_eff`` AND the observed/expected ratio (whole window,
+   or since the change point) is below ``drop_ratio``. A source that still trickles after the change point is a
+   DROP even if its sparse gaps are also significant. **DECAY**: last 7 days vs an earlier reference (up to 28
+   days), both medians and totals below 0.5 (per-weekday expectations), NB test with the reference's own
+   day-to-day variability.
 6. **Duty class** (always_on / business_hours / intermittent) and **monitorability**: ``t_min`` = hours of silence
-   needed (median over start hours of the week) before ``P0 < alpha_eff``; critical keys with ``t_min`` above
-   their SLA are ``unmonitorable`` (one finding per critical agent, recommending a heartbeat).
-7. **Root cause grouping.** tenant, then agents, then log sources, then agent/log-source pairs: children of a
-   SILENT/DROP parent are ``explained`` (fingerprints in ``related``), and a parent whose deficit (≥ 70%) comes
-   from its anomalous children is explained by them instead (one host down is one finding, not a host finding
-   plus a log-source finding). ≥ ``global_fraction`` of always-on agents (or of all agents, with ≥ 5 of them)
-   silent within 2 h, or the whole tenant silent → one ``pipeline.global_silence`` explaining the rest. Heartbeat
-   rules (active on ≥ ``heartbeat_rule_days`` of days) go ``rule_dark`` only while one of their sources (or, when
-   unknown, the tenant) keeps sending; otherwise they are explained by the source finding.
+   needed (median over start hours of the week, same day-level structure as the test) before ``P0 < alpha_eff``;
+   critical keys with ``t_min`` above their SLA are ``unmonitorable`` (one finding per critical agent).
+7. **Root cause grouping.** An agent anomaly carried by exactly one of its channels is that channel's; any other is
+   a whole-host anomaly explaining its channels. ≥ ``global_fraction`` of the agents (always-on first, or all with
+   ≥ 5 of them) with whole-host SILENT or DROP beginning within 2 h, a silent tenant, or a tenant-wide drop no agent
+   or log source accounts for → one ``pipeline.global_silence`` explaining every anomaly that began with it (an EPS
+   limit is one finding, not one per agent). A log source is explained by the host findings that cover its deficit
+   (≥ 70%) or by its only anomalous channel; with several anomalous channels it is itself the root cause (Sysmon
+   lost on 40 hosts is one finding). Heartbeat rules (active on ≥ ``heartbeat_rule_days`` of days) go ``rule_dark``
+   only while one of their sources (or, when unknown, the tenant) keeps sending; otherwise they are explained.
 8. **Tampering**: a SILENT/DROP (including one inside a global outage) preceded by log clearing, audit-policy
-   change, Sysmon/agent stop or auditd reconfiguration on the same agent in ``[start − 2 h, start + 10 min]`` →
-   ``silence.tampering`` (critical, T1070.001 / T1562.002 / T1562.001 and the precursor's own technique).
+   change, Sysmon/agent stop or auditd reconfiguration on the same agent in ``[start − 2 h, start + 10 min]``
+   (a DROP change point is known to the hour: + 1 h) → ``silence.tampering`` (critical, T1070.001 / T1562.002 /
+   T1562.001 and the precursor's own technique).
 
 Silence measured on alerts-only data is *alert* silence: those findings get LOW/MEDIUM confidence and say so
-(rule-level findings keep HIGH: an alert *is* the rule firing).
+(rule-level findings too: that a rule's sources are "alive" rests on other alerts).
 """
 
 from __future__ import annotations
@@ -125,8 +138,11 @@ PERSIST_MIN_RUNS = 5  # informative quiet periods needed (after trimming) before
 PERSIST_INFO = 0.5  # a quiet period is informative when the model expected at least this much in/after it
 PERSIST_LR = 1.355  # half the 90% chi-square(1) quantile: the least correction the data support is used
 THETA_MIN = 0.01
-PRIOR_COMPAT_P = 0.05  # a key whose own off days are this unlikely under its peers' rate ignores that prior
+PRIOR_COMPAT_P = 0.01  # a key whose own off days are this unlikely under its peers' rate ignores that prior
 DAY_VAR_MAX_INFLATION = 4.0
+FAST_TAIL_MEAN = 200.0  # above these, the DROP tail uses the lognormal closed form (exact quadrature below)
+FAST_TAIL_OBSERVED = 20.0
+DOW_PRIOR_DAYS = 2.0  # pseudo-days behind a key's weekday/weekend split when shrinking its weekday factors
 DAY_SIGMA_MIN_EXPECTED = 20.0  # days expected to carry fewer events say little about day-to-day swings
 # Gauss-Hermite (physicists', 10 nodes, positive half): day multipliers D = exp(sqrt(2) sigma x - sigma^2 / 2)
 _GH_NODES = (0.342901327223705, 1.036610829789514, 1.756683649299882, 2.532731674232790, 3.436159118837738)
@@ -220,6 +236,7 @@ class _KeyEval:
     decay_reference: float = 0.0
     decay_ref_days: int = 0
     decay_start: int = 0
+    decay_days: int = DECAY_RECENT_DAYS  # recent days the DECAY test compared
     t_min: float | None = None
     q: float | None = None
     explained_by: _KeyEval | None = None
@@ -392,6 +409,15 @@ class _Engine:
         for info in agents or ():
             if info.name:
                 self.inventory.setdefault(info.name.lower(), info)
+        # agents the Wazuh API shows connected right now (keepalive within KEEPALIVE_FRESH_S of "now", never judged
+        # against an old export): they are demonstrably not "taking the day off", so no day-off tolerance applies
+        self.fresh_agents = {
+            name
+            for name, info in self.inventory.items()
+            if info.status == "active"
+            and (seen := _aware(info.last_keepalive)) is not None
+            and abs(self.now - seen.timestamp()) <= KEEPALIVE_FRESH_S
+        }
         self.profile = basis.profile
         self.alerts_only = basis.input_kind in _ALERTS_ONLY
         self.partial = bool(basis.partial_failures) or basis.sampled
@@ -707,6 +733,7 @@ class _Engine:
         w = n / (n + SHRINK_M)
         n_days = len(p1.base_days)
         ev.baseline_days = n_days
+        w_dow = 1.0
         if n_days >= HOW_MIN_DAYS:
             ev.model = "hour_of_week"
             own = [cc[s] / ex[s] if ex[s] else math.nan for s in range(168)]
@@ -721,7 +748,14 @@ class _Engine:
             ev.model = "hour_of_day"
             hod_own, dow_own = _own_hod_dow(cc, ex)
             hod = [w * hod_own[h] + (1 - w) * peers.hod[h] for h in range(24)]
-            dow = [w * dow_own[d] + (1 - w) * peers.dow[d] for d in range(7)]
+            # A weekday factor is a day-level quantity: its evidence is the number of such days (about two in a
+            # two-week baseline), not the number of events. The key's own weekday/weekend split is kept, and each
+            # day's deviation from it is shrunk accordingly (it is mostly noise), then the whole toward the peers.
+            w_dow = (n_days / 7.0) / (n_days / 7.0 + DOW_PRIOR_DAYS)
+            weekday_mean = math.fsum(dow_own[:5]) / 5.0
+            weekend_mean = math.fsum(dow_own[5:]) / 2.0
+            dow_key = [w_dow * dow_own[d] + (1 - w_dow) * (weekday_mean if d < 5 else weekend_mean) for d in range(7)]
+            dow = [w * dow_key[d] + (1 - w) * peers.dow[d] for d in range(7)]
             shape_raw = [dow[s // 24] * hod[s % 24] for s in range(168)]
             p_shape = 31.0
         # Two views of the same profile: smoothed ±1 h (DROP, DECAY, t_min, scale) and unsmoothed for P0, where the
@@ -775,19 +809,22 @@ class _Engine:
         num_d = math.fsum(e * e for e, _ in exp_days)
         den_d = math.fsum((t - e) * (t - e) - t for e, t in exp_days)
         # Predictive day-level variance. The residuals are measured against a profile fitted to these same days: the
-        # scale and (with weight w) six weekday factors, each learnt from only ~2 days in a two-week baseline, which
+        # scale and (with weights w, w_dow) weekday factors, each learnt from only ~2 days in a two-week baseline, which
         # absorb part of the day-to-day swings and are themselves uncertain for the next day. Both effects are undone
-        # with the (1 + p/n) / (1 - p/n) factor, p = 1 + 6w parameters over n days.
-        p_day = 1.0 + 6.0 * w
+        # with the (1 + p/n) / (1 - p/n) factor, p = 1 + w (1 + 5 w_dow) effective parameters over n days.
+        p_day = 1.0 + w * (1.0 + 5.0 * w_dow)
         inflate = min(DAY_VAR_MAX_INFLATION, (1.0 + p_day / n_days) / max(0.25, 1.0 - p_day / n_days))
-        cv2_robust = math.expm1(_day_log_sigma(exp_days) ** 2)
-        # the method of moments on ~2 weeks of days is noisy and blind to heavy tails: never assume less day-to-day
-        # variance than the robust log-scale estimate says
-        inv_day = max(1.0 / stats.mom_size_from_sums(num_d, den_d), cv2_robust) * inflate
-        ev.day_sigma = math.sqrt(math.log1p(cv2_robust * inflate))
+        # Day-to-day spread on the log scale (winsorized, so one spike or one near-empty day does not dominate; days
+        # that fall far below expectation are the low-day mixture's business); the method of moments only when too
+        # few days carry enough events for a log-scale estimate.
+        log_sigma = _day_log_sigma(exp_days)
+        cv2 = math.expm1(log_sigma**2) if log_sigma > 0 else 1.0 / stats.mom_size_from_sums(num_d, den_d)
+        inv_day = cv2 * inflate
+        ev.day_sigma = math.sqrt(math.log1p(cv2 * inflate))
         ev.k_day = stats.clip(1.0 / max(inv_day, 1.0 / stats.K_MAX), stats.K_MIN, stats.K_MAX)
         ev.n_eff = n_days / (1.0 / scale + 1.0 / ev.k_day)
-        if ev.duty != "always_on":
+        powered_on = ev.level in ("agent", "agent_log_source") and ev.key[0].lower() in self.fresh_agents
+        if ev.duty != "always_on" and not powered_on:
             # sources that skip whole days (laptops, desktops...) learn how often from their history and peers;
             # always-on sources never get this tolerance, so their outages stay detectable within hours
             group = (ev.tier, p1.weekend)
@@ -795,7 +832,9 @@ class _Engine:
             ev.pi_low = _day_rate(p1.n_low, p1.n_elig, ev.tier, peers.low.get(group))
             if ev.pi_off > 0:
                 # days off come in runs (sick days, vacations): how likely one more day off is after n of them,
-                # from the peers' runs (critical keys: their own record only, as for the day-off rate)
+                # from the peers' runs (critical keys: their own record only, as for the day-off rate). Trade-off: a
+                # standard-tier weekday-only source that dies over a weekend is reported once this tolerance is used
+                # up (a connected agent per the Wazuh API gets none; critical keys rely on their own record).
                 if ev.tier == "critical":
                     ev.stay = _stay_curve(list(p1.off_runs), ev.pi_off)[:1]
                 else:
@@ -831,15 +870,16 @@ class _Engine:
                 continue
             for shift in (0, -1, 1):
                 log_nb, lam = self._log_p0_gap(
-                    model, ev.k, ev.pi_off, start, self.end, shift, ev.stay, ev.day_sigma
+                    model, ev.k, ev.pi_off, start, self.end, shift, ev.stay, ev.day_sigma, ev.theta
                 )
                 if shift == 0 and model is rate:
                     ev.expected_gap = lam
+                # scale uncertainty; a bursty source (theta < 1) has proportionally fewer "independent" events
+                eff = lam * ev.theta
                 n_used = min(ev.n_eff, max(1.0, lam * occ))
-                pred = -n_used * math.log1p(lam / n_used) if lam > 0 and not math.isinf(n_used) else -lam
+                pred = -n_used * math.log1p(eff / n_used) if eff > 0 and not math.isinf(n_used) else -eff
                 best = max(best, log_nb, pred)
-        # bursty sources: quiet periods that persist are part of their normal behaviour (see _persistence)
-        ev.log_p0 = min(0.0, ev.theta * best)
+        ev.log_p0 = min(0.0, best)
         if ev.log_p0 < self.log_alpha:
             ev.status = "silent"
 
@@ -853,6 +893,7 @@ class _Engine:
         shift: int,
         stay: Sequence[float] = (),
         day_sigma: float = 0.0,
+        theta: float = 1.0,
     ) -> tuple[float, float]:
         """``(log P0, expected events)`` of the gap ``[start, stop)``.
 
@@ -860,7 +901,8 @@ class _Engine:
         was on and sent nothing. Days off come in runs (vacations, a laptop left in a drawer): the first substantial
         day of the gap is off with probability ``pi_off``, the next ones with ``max(pi_off, stay[n - 1])`` after ``n``
         days off (the last value repeats). A key whose daily volume swings (``day_sigma``, lognormal) is integrated over
-        its day multiplier per local day: a quiet gap on a slow day is less surprising than on an average one.
+        its day multiplier per local day: a quiet gap on a slow day is less surprising than on an average one. Bursty
+        keys (``theta`` < 1, see :func:`_persistence`) pay ``theta`` times each hour's cost, given the day multiplier.
         """
         clock = self.clock
         slots, days, cal = clock.slot, clock.day, clock.cal
@@ -928,10 +970,10 @@ class _Engine:
                 acc = 0.0
                 lam_day = 0.0
                 node_acc = [0.0] * len(mults)
-            acc -= k * math.log1p(mu / k)
+            acc -= theta * k * math.log1p(mu / k)
             lam_day += mu
             for idx, m in enumerate(mults):
-                node_acc[idx] -= k * math.log1p(mu * m / k)
+                node_acc[idx] -= theta * k * math.log1p(mu * m / k)
         if not floor_hit and cur >= 0:
             total += close_day()
         return max(total, LOG_FLOOR) if floor_hit else total, lam
@@ -1017,27 +1059,44 @@ class _Engine:
         ratio = observed / expected
         ev.drop_ratio = ratio
         # Effect size: the whole window, or the part since the change point when that part alone carries enough
-        # expected volume (a sharp 80% drop 6 hours ago is a DROP now, not after most of the window has elapsed).
+        # expected volume and the source still trickles in it (a sharp 80% drop 6 hours ago is a DROP now, not after
+        # most of the window has elapsed; an empty stretch is a gap, the SILENT test's business, and one followed by
+        # events in the current hour is a lull that already ended).
+        use_segment = best_i > 0 and seg_expected >= MIN_DROP_EXPECTED and seg_observed > 0
         effect = ratio
-        if seg_expected >= MIN_DROP_EXPECTED and best_i > 0:
+        if use_segment:
             effect = min(effect, seg_observed / seg_expected)
         if effect >= self.cfg.drop_ratio:
             return
         pi_low = max(ev.pi_off, ev.pi_low)
         k_hour = stats.matched_size(mus, ev.k)
-        k_day = ev.k_day * max(1.0, hours / 24.0)
-        size = stats.combine_sizes(k_hour, k_day, ev.n_eff)
-        log_p = self._drop_logcdf(observed, expected, size, pi_low, day_expected)
-        if best_i > 0 and seg_expected >= MIN_DROP_EXPECTED:
+        days = max(1.0, hours / 24.0)
+        if ev.day_sigma >= 0.05:
+            # day swings as a lognormal multiplier of the window total (averaged over the window's days)
+            sigma = math.sqrt(math.log1p(math.expm1(ev.day_sigma**2) / days))
+            size = stats.combine_sizes(k_hour, ev.n_eff)
+        else:
+            sigma = 0.0
+            size = stats.combine_sizes(k_hour, ev.k_day * days, ev.n_eff)
+        log_p = self._drop_logcdf(observed, expected, size, pi_low, day_expected, sigma, ev.baseline_days - 1.0)
+        if use_segment:
             # the same NB tail on the part since the change point, Bonferroni-corrected for the candidate change
-            # points: a sharp drop (audit policy switched off at 14:40) is significant hours before the whole window
+            # points: a sharp drop (audit policy switched off at 14:40) is significant hours before the whole window.
+            # Hours of a bursty source are not independent: its multi-hour sums vary theta^-1 times more.
             seg_days: dict[int, float] = {}
             for mu, day in zip(seg_mus, day_of[::-1][best_i:], strict=True):
                 seg_days[day] = seg_days.get(day, 0.0) + mu
-            seg_size = stats.combine_sizes(
-                stats.matched_size(seg_mus, ev.k), ev.k_day * max(1.0, len(seg_mus) / 24.0), ev.n_eff
+            seg_hour = stats.matched_size(seg_mus, ev.k) * ev.theta
+            seg_days_n = max(1.0, len(seg_mus) / 24.0)
+            if ev.day_sigma >= 0.05:
+                seg_sigma = math.sqrt(math.log1p(math.expm1(ev.day_sigma**2) / seg_days_n))
+                seg_size = stats.combine_sizes(seg_hour, ev.n_eff)
+            else:
+                seg_sigma = 0.0
+                seg_size = stats.combine_sizes(seg_hour, ev.k_day * seg_days_n, ev.n_eff)
+            seg_log_p = self._drop_logcdf(
+                seg_observed, seg_expected, seg_size, pi_low, seg_days, seg_sigma, ev.baseline_days - 1.0
             )
-            seg_log_p = self._drop_logcdf(seg_observed, seg_expected, seg_size, pi_low, seg_days)
             log_p = min(log_p, min(0.0, seg_log_p + math.log(hours)))
         ev.drop_p = math.exp(log_p)
         if log_p < self.log_alpha:
@@ -1047,22 +1106,57 @@ class _Engine:
 
     @staticmethod
     def _drop_logcdf(
-        observed: float, expected: float, size: float, pi_off: float, day_expected: dict[int, float]
+        observed: float,
+        expected: float,
+        size: float,
+        pi_off: float,
+        day_expected: dict[int, float],
+        sigma: float = 0.0,
+        dof: float = math.inf,
     ) -> float:
         """NB lower tail of the window total, mixed over "low days" for sources that skip (parts of) whole days.
 
         With ``D`` days carrying a substantial share of the expected volume and a low-day probability ``pi`` (a day
         below ``drop_ratio`` of its expectation, learned from the key's history and peers), the number of low days
         is Binomial(D, pi); ``j`` low days are conservatively treated as empty, leaving ``(D - j) / D`` of the
-        expected volume.
+        expected volume. With ``sigma`` > 0 the day-to-day swing of the window total is a lognormal multiplier
+        (Gauss-Hermite), as in the SILENT test, instead of being folded into ``size``: a gamma with the same variance
+        has a far heavier lower tail and would hide real drops of sources whose volume swings. ``sigma`` itself was
+        estimated from ``dof + 1`` days, so it is integrated over its chi-square sampling distribution (a Student-t
+        on the log scale): at the tiny ``alpha_eff`` a plug-in variance would be badly overconfident.
         """
 
-        def tail(mean: float, k: float) -> float:
+        def nb_tail(mean: float, k: float) -> float:
             if mean <= 0:
                 return 0.0
             return (
                 stats.nb_logcdf(observed, mean, k) if not math.isinf(k) else stats.poisson_logcdf(int(observed), mean)
             )
+
+        scales = _sigma_mixture(sigma, dof) if sigma >= 0.05 else []
+
+        def tail(mean: float, k: float) -> float:
+            if not scales or mean <= 0:
+                return nb_tail(mean, k)
+            if mean >= FAST_TAIL_MEAN and observed >= FAST_TAIL_OBSERVED:
+                # large counts: the NB part is itself close to lognormal, so the day multiplier and the count noise
+                # combine in closed form (a normal CDF per variance scale) instead of 60 NB tail evaluations
+                noise = math.log1p(1.0 / mean + (0.0 if math.isinf(k) else 1.0 / k))
+                total = -math.inf
+                for log_ws, sig in scales:
+                    var = sig * sig + noise
+                    z = (math.log((observed + 0.5) / mean) + var / 2.0) / math.sqrt(var)
+                    total = stats.logaddexp(total, log_ws + _log_ndtr(z))
+                return min(0.0, total)
+            total = -math.inf
+            for log_ws, sig in scales:
+                for x, w in zip(_GH_NODES, _GH_WEIGHTS, strict=True):
+                    for sign in (-1.0, 1.0):
+                        mult = math.exp(sign * math.sqrt(2.0) * sig * x - sig * sig / 2.0)
+                        total = stats.logaddexp(
+                            total, log_ws + math.log(w / math.sqrt(math.pi)) + nb_tail(mean * mult, k)
+                        )
+            return min(0.0, total)
 
         base = tail(expected, size)
         if pi_off <= 0:
@@ -1095,61 +1189,97 @@ class _Engine:
         return max(0, self.end_hour - 1 - first_hour)
 
     def _test_decay(self, ev: _KeyEval, p1: _P1) -> None:
-        """Slow decline: the last 7 days vs the earlier reference, in medians (spec) AND in totals.
+        """Sustained decline: the most recent days against an older reference (up to ``DECAY_SPAN_DAYS``).
 
-        Requiring both keeps a single noisy statistic from firing (two days off in a week of a laptop collapse the
-        median, not the total). Expectations are per weekday from the reference, the NB size combines day-level
-        and reference uncertainty, and sources that skip whole days get the same low-day mixture as DROP.
+        The spec's test compares the last 7 days with the reference, in medians AND in totals (a single noisy
+        statistic does not fire: two days off in a week of a laptop collapse the median, not the total), ratio below
+        ``DECAY_RATIO``. The last 2..6 days are also compared (a drop below ``drop_ratio``): once a partial drop has
+        been in the rolling baseline for a day or two, the DROP test no longer sees it, while this reference predates
+        it. Expectations are per weekday from the reference; the day-to-day variability is the reference's own
+        (inflated for its weekday means being estimated from few days each) as a lognormal multiplier; sources that
+        skip whole days get the same low-day mixture as DROP; the spans are Bonferroni-corrected.
         """
         days = p1.all_days
-        if len(days) < DECAY_MIN_RECENT_DAYS + DECAY_MIN_REF_DAYS:
+        if len(days) < DECAY_MIN_REF_DAYS + 2:
             return
         clock = self.clock
         last_day = days[-1][0]
-        recent = [(j, t) for j, t in days if j > last_day - DECAY_RECENT_DAYS]
         reference = [(j, t) for j, t in days if j <= last_day - DECAY_RECENT_DAYS]
-        if len(recent) < DECAY_MIN_RECENT_DAYS or len(reference) < DECAY_MIN_REF_DAYS:
+        if len(reference) < DECAY_MIN_REF_DAYS:
             return
-        med_recent = stats.median(t for _, t in recent)
         med_ref = stats.median(t for _, t in reference)
         if med_ref < DECAY_MIN_REF_MEDIAN:
             return
         mean_ref = stats.trimmed_mean((t for _, t in reference), 0.1)
-        by_dow: dict[int, list[float]] = {}
+        if mean_ref <= 0:
+            return
+        # Expected day = the reference's mean for that weekday, shrunk toward its weekday/weekend mean (a weekday mean
+        # of 2-3 days is mostly noise). The day-to-day variability comes from the reference itself (the baseline can
+        # contain the very decline under test), with leave-one-out expectations: each reference day is predicted
+        # without itself, which measures the prediction error directly (no small-sample bias, no inflation factor).
+        dow_sum = [0.0] * 7
+        dow_n = [0] * 7
         for j, total in reference:
-            by_dow.setdefault(clock.day_dow[j], []).append(total)
-        expected_by_day = {
-            j: (math.fsum(by_dow[clock.day_dow[j]]) / len(by_dow[clock.day_dow[j]]))
-            if clock.day_dow[j] in by_dow
-            else mean_ref
-            for j, _ in recent
-        }
-        observed = math.fsum(t for _, t in recent)
-        expected = math.fsum(expected_by_day.values())
-        if expected <= 0 or mean_ref <= 0:
-            return
-        ratio = observed / expected
-        ev.decay_ratio = ratio
-        ev.decay_recent, ev.decay_reference, ev.decay_ref_days = med_recent, med_ref, len(reference)
-        ev.decay_start = clock.day_first[recent[0][0]] + clock.start
-        if ratio >= DECAY_RATIO or med_recent >= DECAY_RATIO * med_ref:
-            return
-        # Day-to-day variability of the reference itself around its weekday means (the baseline's k_day can contain
-        # the very decline under test), inflated for the weekday means being estimated from few days each.
-        ref_exp = [
-            ((math.fsum(by_dow[clock.day_dow[j]]) / len(by_dow[clock.day_dow[j]])), t) for j, t in reference
-        ]
+            dow_sum[clock.day_dow[j]] += total
+            dow_n[clock.day_dow[j]] += 1
+
+        def expect(dow: int, leave_out: float | None = None) -> float:
+            drop = 0 if leave_out is None else 1
+            span = range(5) if dow < 5 else range(5, 7)
+            n_group = sum(dow_n[d] for d in span) - drop
+            sum_group = math.fsum(dow_sum[d] for d in span) - (leave_out or 0.0)
+            n_all = len(reference) - drop
+            base = sum_group / n_group if n_group > 0 else (math.fsum(dow_sum) - (leave_out or 0.0)) / max(1, n_all)
+            n_day = dow_n[dow] - drop
+            if n_day <= 0:
+                return base
+            weight = n_day / (n_day + DOW_PRIOR_DAYS)
+            return weight * (dow_sum[dow] - (leave_out or 0.0)) / n_day + (1.0 - weight) * base
+
+        ref_exp = [(expect(clock.day_dow[j], t), t) for j, t in reference]
         num = math.fsum(e * e for e, _ in ref_exp)
         den = math.fsum((t - e) * (t - e) - t for e, t in ref_exp)
-        groups = len(by_dow)
-        inflate = min(DAY_VAR_MAX_INFLATION, (1.0 + groups / len(reference)) / max(0.25, 1.0 - groups / len(reference)))
-        inv = max(1.0 / stats.mom_size_from_sums(num, den), math.expm1(_day_log_sigma(ref_exp) ** 2), 1.0 / stats.K_MAX)
-        spread = math.fsum(e * e for e in expected_by_day.values()) * inv * inflate
-        size = expected * expected / spread if spread > 0 else stats.K_MAX
-        log_p = self._drop_logcdf(observed, expected, size, max(ev.pi_off, ev.pi_low), expected_by_day)
+        cv2 = max(1.0 / stats.mom_size_from_sums(num, den), math.expm1(_day_log_sigma(ref_exp) ** 2))
+        pi_low = max(ev.pi_off, ev.pi_low)
+        spans = range(2, DECAY_RECENT_DAYS + 1)
+        best: tuple[float, int, float, float, float] | None = None  # (log p, span, ratio, recent median, observed)
+        for span in spans:
+            recent = [(j, t) for j, t in days if j > last_day - span]
+            if len(recent) < (DECAY_MIN_RECENT_DAYS if span == DECAY_RECENT_DAYS else max(2, span - 2)):
+                continue
+            expected_by_day = {j: expect(clock.day_dow[j]) for j, _ in recent}
+            observed = math.fsum(t for _, t in recent)
+            expected = math.fsum(expected_by_day.values())
+            if expected <= 0:
+                continue
+            ratio = observed / expected
+            med_recent = stats.median(t for _, t in recent)
+            if span == DECAY_RECENT_DAYS:
+                ev.decay_ratio = ratio
+                ev.decay_recent, ev.decay_reference, ev.decay_ref_days = med_recent, med_ref, len(reference)
+                ev.decay_start = clock.day_first[recent[0][0]] + clock.start
+                if ratio >= DECAY_RATIO or med_recent >= DECAY_RATIO * med_ref:
+                    continue
+            elif ratio >= self.cfg.drop_ratio:
+                continue
+            spread = math.fsum(e * e for e in expected_by_day.values()) * cv2
+            sigma = math.sqrt(math.log1p(spread / (expected * expected))) if spread > 0 else 0.0
+            size = ev.k * 24.0 * len(recent)  # hourly overdispersion of the recent total (the day part is sigma)
+            log_p = self._drop_logcdf(observed, expected, size, pi_low, expected_by_day, sigma, len(reference) - 1.0)
+            log_p = min(0.0, log_p + math.log(len(spans)))
+            if best is None or log_p < best[0]:
+                best = (log_p, span, ratio, med_recent, observed)
+        if best is None:
+            return
+        log_p, span, ratio, med_recent, _ = best
         ev.decay_p = math.exp(log_p)
         if log_p < self.log_alpha:
             ev.status = "decay"
+            ev.decay_days = span
+            ev.decay_ratio = ratio
+            ev.decay_recent = med_recent
+            recent_first = min(j for j, _ in days if j > last_day - span)
+            ev.decay_start = clock.day_first[recent_first] + clock.start
 
     def _q_values(self) -> None:
         tested = [ev for ev in self.evals.values() if ev.evaluated]
@@ -1219,8 +1349,8 @@ class _Engine:
         """Whether the gap of ``ev`` was already a SILENT alarm at time ``t`` (same model, smoothed profile)."""
         if ev.rate is None or t <= ev.last:
             return False
-        log_p0, _ = self._log_p0_gap(ev.rate, ev.k, ev.pi_off, ev.last, t, 0, ev.stay, ev.day_sigma)
-        return ev.theta * log_p0 < self.log_alpha
+        log_p0, _ = self._log_p0_gap(ev.rate, ev.k, ev.pi_off, ev.last, t, 0, ev.stay, ev.day_sigma, ev.theta)
+        return log_p0 < self.log_alpha
 
     def _single_cause(self, parent: _KeyEval, anomalous: Sequence[_KeyEval]) -> _KeyEval | None:
         """The only anomalous child, when it alone carries >= ATTRIBUTION_SHARE of the parent's deficit."""
@@ -1492,8 +1622,11 @@ class _Engine:
                 ev.final = "ok" if ev.status in ("ok", "silent", "drop", "decay") else ev.status
 
     def _t_min(self, ev: _KeyEval) -> float:
+        """Hours of silence (median over start times across the week) before the SILENT test fires."""
         rate = ev.rate
         assert rate is not None
+        if ev.day_sigma >= 0.05 or ev.pi_off > 0:
+            return self._t_min_scan(ev, rate)
         k = ev.k
         periods = TMIN_HORIZON_H // 168 + 2
         lp = [-k * math.log1p(r / k) if r > 0 else 0.0 for r in rate] * periods
@@ -1513,18 +1646,80 @@ class _Engine:
             t = max(i1, i2) - s0
             values.append(float(t) if max(i1, i2) < len(neg_l) and t <= TMIN_HORIZON_H else math.inf)
         values.sort()
-        result = values[len(values) // 2]
-        if ev.pi_off > 0 and not math.isinf(result):
-            # whole days off: the first costs log(pi_off), the n-th after it log(stay[n - 1])
-            target = self.log_alpha / ev.theta
-            cost = math.log(ev.pi_off)
-            days_off = 1
-            while cost > target and days_off < MAX_LOOKBACK_DAYS:
-                q = min(0.999, max(ev.pi_off, ev.stay[min(days_off, len(ev.stay)) - 1])) if ev.stay else ev.pi_off
-                cost += math.log(q)
-                days_off += 1
-            result = max(result, 24.0 * days_off)
-        return result
+        return values[len(values) // 2]
+
+    def _t_min_scan(self, ev: _KeyEval, rate: Sequence[float]) -> float:
+        """:meth:`_t_min` for keys with day-level structure (lognormal day swings, days off): the same per-day
+        integration and day-off mixture as the SILENT test, over a synthetic week (local midnights at slot % 24 == 0),
+        from start times spread over the week."""
+        k = ev.k
+        theta = ev.theta
+        target = self.log_alpha
+        mults: list[float] = []
+        log_w: list[float] = []
+        if ev.day_sigma >= 0.05:
+            for x, w in zip(_GH_NODES, _GH_WEIGHTS, strict=True):
+                for sign in (-1.0, 1.0):
+                    mults.append(math.exp(sign * math.sqrt(2.0) * ev.day_sigma * x - ev.day_sigma**2 / 2.0))
+                    log_w.append(math.log(w / math.sqrt(math.pi)))
+        pi_off = ev.pi_off
+        probs = [min(0.999, max(pi_off, q)) for q in ev.stay]
+        n_eff = ev.n_eff
+        values: list[float] = []
+        for s0 in range(0, 168, 7):
+            closed = 0.0
+            acc = 0.0
+            nodes = [0.0] * len(mults)
+            lam = lam_day = 0.0
+            first = True
+            days_off = 0
+            found = math.inf
+            for h in range(TMIN_HORIZON_H):
+                slot = (s0 + h) % 168
+                if h and slot % 24 == 0:  # local midnight: close the day
+                    closed += self._day_value(acc, nodes, log_w, first, pi_off, probs, days_off)
+                    if not first and pi_off > 0 and lam_day >= ELIGIBLE_DAY_EXPECTED:
+                        days_off += 1
+                    first = False
+                    acc = lam_day = 0.0
+                    nodes = [0.0] * len(mults)
+                mu = rate[slot]
+                if mu <= 0.0:
+                    continue
+                lam += mu
+                lam_day += mu
+                acc -= theta * k * math.log1p(mu / k)
+                for idx, m in enumerate(mults):
+                    nodes[idx] -= theta * k * math.log1p(mu * m / k)
+                current = closed + self._day_value(acc, nodes, log_w, first, pi_off, probs, days_off)
+                pred = -n_eff * math.log1p(theta * lam / n_eff) if not math.isinf(n_eff) else -theta * lam
+                if max(current, pred) < target:
+                    found = float(h + 1)
+                    break
+            values.append(found)
+        values.sort()
+        return values[len(values) // 2]
+
+    @staticmethod
+    def _day_value(
+        acc: float,
+        nodes: Sequence[float],
+        log_w: Sequence[float],
+        first: bool,
+        pi_off: float,
+        probs: Sequence[float],
+        days_off: int,
+    ) -> float:
+        day = acc
+        if nodes:
+            day = -math.inf
+            for lw, a in zip(log_w, nodes, strict=True):
+                day = stats.logaddexp(day, lw + a)
+            day = min(0.0, max(day, acc))
+        if first or pi_off <= 0:
+            return day
+        q = probs[min(days_off, len(probs)) - 1] if days_off and probs else pi_off
+        return stats.logaddexp(math.log(q), math.log1p(-q) + day) if q < 1.0 else 0.0
 
     # ---- findings -------------------------------------------------------------------------------------------
 
@@ -1558,7 +1753,9 @@ class _Engine:
         if self.partial:
             return Confidence.LOW
         if ev.level == "rule":
-            return Confidence.HIGH if self.basis.input_kind != "unknown" else Confidence.MEDIUM
+            # the rule stopping is certain (an alert IS the rule firing), but on alerts-only input "its sources are
+            # alive" rests on other alerts, not on the raw events: that is alert silence, MEDIUM at most (§2.4)
+            return Confidence.MEDIUM if self.alerts_only or self.basis.input_kind == "unknown" else Confidence.HIGH
         if self.alerts_only:
             return Confidence.MEDIUM if ev.scale >= 20.0 else Confidence.LOW
         if self.basis.input_kind in _ARCHIVES:
@@ -1576,6 +1773,10 @@ class _Engine:
                 k=ev.k,
             )
         ]
+        if ev.theta < 0.95:
+            reasons.append(M("silence.reason.bursty", factor=1.0 / ev.theta))
+        if ev.pi_off >= 0.01:
+            reasons.append(M("silence.reason.days_off", share=ev.pi_off))
         if self.alerts_only and ev.level != "rule":
             reasons.append(M("silence.reason.alerts_only"))
         if self.partial:
@@ -1593,37 +1794,17 @@ class _Engine:
             return ([M("silence.reason.agent_unregistered")] if self.inventory else []), None
         seen = _aware(info.last_keepalive)
         keepalive = iso(seen) or "-"
-        fresh = seen is not None and seen.year < 9999 and self.now - seen.timestamp() <= KEEPALIVE_FRESH_S
         status = _agent_status(info.status)
-        if info.status == "active" and fresh:
-            return [M("silence.reason.agent_active", status=status, keepalive=keepalive)], Confidence.HIGH
+        if ev.key[0].lower() in self.fresh_agents:
+            # connected now (keepalive near "now", never a keepalive newer than an old export) yet quiet; on alerts-only
+            # input the quiet part is alerts, not events, so it does not raise the confidence
+            if self.alerts_only:
+                return [M("silence.reason.agent_active_alerts", status=status, keepalive=keepalive)], None
+            confidence = None if self.partial else Confidence.HIGH
+            return [M("silence.reason.agent_active", status=status, keepalive=keepalive)], confidence
         if info.status in ("disconnected", "never_connected", "pending"):
             return [M("silence.reason.agent_disconnected", status=status, keepalive=keepalive)], None
         return [], None
-        agent = ev.key[0]
-        info = self.inventory.get(agent.lower())
-        if info is None:
-            # Never downgrade on absence: syslog devices (firewalls...) report through the manager and are not
-            # Wazuh agents, so "not in the inventory" is context, not evidence of retirement.
-            if self.inventory:
-                return [M("silence.reason.agent_unregistered")], None, None
-            return [], None, None
-        seen = _aware(info.last_keepalive)
-        keepalive = iso(seen) or "-"
-        fresh = seen is not None and seen.year < 9999 and self.now - seen.timestamp() <= KEEPALIVE_FRESH_S
-        if info.status == "active" and fresh:
-            return (
-                [M("silence.reason.agent_active", status=_agent_status(info.status), keepalive=keepalive)],
-                None,
-                Confidence.HIGH,
-            )
-        if info.status in ("disconnected", "never_connected", "pending"):
-            return (
-                [M("silence.reason.agent_disconnected", status=_agent_status(info.status), keepalive=keepalive)],
-                None,
-                None,
-            )
-        return [], None, None
 
     def _key_finding(self, ev: _KeyEval) -> Finding:
         kind = _KIND_OF_STATUS[ev.final]
@@ -1656,6 +1837,27 @@ class _Engine:
                     ratio=ev.drop_ratio or 0.0,
                     p=ev.drop_p if ev.drop_p is not None else 1.0,
                     alpha=self.alpha,
+                )
+            )
+            if ev.drop_segment is not None and ev.drop_start is not None and ev.drop_segment[1] > 0:
+                seg_observed, seg_expected = ev.drop_segment
+                reasons.append(
+                    M(
+                        "silence.reason.drop_since",
+                        since=iso(_dt(ev.drop_start)) or "-",
+                        observed=int(seg_observed),
+                        expected=seg_expected,
+                        ratio=seg_observed / seg_expected,
+                    )
+                )
+        elif ev.status == "decay" and ev.decay_days < DECAY_RECENT_DAYS:
+            reasons.append(
+                M(
+                    "silence.reason.decay_days",
+                    days=ev.decay_days,
+                    ratio=ev.decay_ratio or 0.0,
+                    ref_days=ev.decay_ref_days,
+                    p=ev.decay_p if ev.decay_p is not None else 1.0,
                 )
             )
         elif ev.status == "decay":
@@ -1727,7 +1929,9 @@ class _Engine:
                 recommendation = M("silence.rec.drop", key=key_msg, filter=filt, since=iso(_dt(since_ts)) or "-")
             else:
                 title = M("silence.title.decay", key=key_msg, ratio=ev.decay_ratio or 0.0)
-                severity = _DECAY_SEV[ev.tier]
+                # a sustained loss as deep as a DROP is as serious as one
+                deep = ev.decay_ratio is not None and ev.decay_ratio < self.cfg.drop_ratio
+                severity = (_DROP_SEV if deep else _DECAY_SEV)[ev.tier]
                 recommendation = M("silence.rec.decay", key=key_msg, filter=filt)
             confidence = conf_override or self._confidence(ev)
         return Finding(
@@ -1912,7 +2116,7 @@ class _Engine:
                     domain="silence",
                     title=title,
                     severity=severity,
-                    subject=f"agent:{agent}",
+                    subject=f"agent:{_esc(agent)}",
                     reasons=[
                         M(
                             "silence.reason.unmonitorable",
@@ -2036,11 +2240,19 @@ class _Engine:
                 "burstiness": round(ev.theta, 4),
             }
         )
+        if ev.drop_segment is not None and ev.drop_start is not None:
+            evidence["since_change"] = {
+                "start": iso(_dt(ev.drop_start)),
+                "observed": ev.drop_segment[0],
+                "expected": round(ev.drop_segment[1], 3),
+                "ratio": ev.drop_segment[0] / ev.drop_segment[1] if ev.drop_segment[1] > 0 else None,
+            }
         if ev.decay_ratio is not None:
             evidence["decay"] = {
                 "recent_median": ev.decay_recent,
                 "reference_median": ev.decay_reference,
                 "reference_days": ev.decay_ref_days,
+                "recent_days": ev.decay_days,
                 "ratio": ev.decay_ratio,
                 "p": ev.decay_p,
             }
@@ -2066,15 +2278,15 @@ class _Engine:
         if level == "tenant":
             return M("silence.filter.all"), {}
         if level == "rule":
-            return M("silence.filter.one", field=rule_f, value=key[0]), {rule_f: key[0]}
+            return M("silence.filter.one", field=rule_f, value=_quoted(key[0])), {rule_f: key[0]}
         if level == "agent":
             return M("silence.filter.one", field=host_f, value=Entity("host", key[0])), {host_f: Entity("host", key[0])}
         ls = key[-1]
         field_ls = ls_f or _wazuh_ls_field(ls)
         if level == "log_source":
-            return M("silence.filter.one", field=field_ls, value=ls), {field_ls: ls}
+            return M("silence.filter.one", field=field_ls, value=_quoted(ls)), {field_ls: ls}
         return (
-            M("silence.filter.two", field1=host_f, value1=Entity("host", key[0]), field2=field_ls, value2=ls),
+            M("silence.filter.two", field1=host_f, value1=Entity("host", key[0]), field2=field_ls, value2=_quoted(ls)),
             {host_f: Entity("host", key[0]), field_ls: ls},
         )
 
@@ -2296,7 +2508,7 @@ def _persistence(p1: _P1, rate: Sequence[float], k: float, clock: _Clock, within
     ``theta`` is the maximum-likelihood value over the key's runs, with the longest 10% censored at the next longest
     (one maintenance window is not burstiness) and at least ``PERSIST_MIN_RUNS`` informative runs; the *largest* theta
     within the 90% likelihood interval is used (the least correction the data support). ``theta = 1`` is the plain
-    model; the SILENT statistic becomes ``theta × log P0``.
+    model; in the SILENT test every hour of a gap costs ``theta`` times its NB cost.
     """
     nz = p1.nz
     n = len(nz)
@@ -2345,44 +2557,110 @@ def _persistence(p1: _P1, rate: Sequence[float], k: float, clock: _Clock, within
 
     def slope(theta: float) -> float:
         # d/dtheta log(1 - exp(-theta t)) = t / (exp(theta t) - 1), written so that it never overflows
-        total = 0.0
+        total = -sum_c
         for t in terms:
             x = theta * t
             total += 1.0 / theta if x < 1e-12 else t * math.exp(-x) / -math.expm1(-x)
-        return total - sum_c
+        return total
 
     def loglik(theta: float) -> float:
-        return -theta * sum_c + math.fsum(math.log(max(-math.expm1(-theta * t), 1e-300)) for t in terms)
+        total = -theta * sum_c
+        for t in terms:
+            total += math.log(max(-math.expm1(-theta * t), 1e-300))
+        return total
 
     if sum_c <= 0.0 or slope(1.0) >= 0.0:
         return 1.0
-    lo, hi = 1e-6, 1.0
-    if terms and slope(lo) > 0.0:
-        for _ in range(60):
+    # bisection in log(theta): the log-likelihood is concave, its slope decreasing
+    lo, hi = math.log(1e-6), 0.0
+    if terms and slope(1e-6) > 0.0:
+        for _ in range(40):
             mid = 0.5 * (lo + hi)
-            if slope(mid) > 0.0:
+            if slope(math.exp(mid)) > 0.0:
                 lo = mid
             else:
                 hi = mid
-        best = 0.5 * (lo + hi)
-    else:
-        best = lo
+    best = math.exp(0.5 * (lo + hi)) if terms else 1e-6
     peak = loglik(best)
-    lo, hi = best, 1.0
-    if peak - loglik(hi) <= PERSIST_LR:
+    if peak - loglik(1.0) <= PERSIST_LR:
         return 1.0
-    for _ in range(60):
+    lo, hi = math.log(best), 0.0
+    for _ in range(30):
         mid = 0.5 * (lo + hi)
-        if peak - loglik(mid) <= PERSIST_LR:
+        if peak - loglik(math.exp(mid)) <= PERSIST_LR:
             lo = mid
         else:
             hi = mid
-    return max(THETA_MIN, lo)
+    return max(THETA_MIN, math.exp(lo))
+
+
+# (probability, weight) of the chi-square quantiles used to integrate an estimated variance (midpoint rule on
+# [0, .04, .2, .4, .6, .8, 1]); the lowest quantiles give the largest sigmas and dominate a lower tail
+_CHI2_POINTS = ((0.02, 0.04), (0.12, 0.16), (0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.9, 0.2))
+
+
+def _normal_quantile(p: float) -> float:
+    """Inverse standard normal CDF (Acklam's rational approximation, |error| < 1.2e-9)."""
+    a = (
+        -39.69683028665376,
+        220.9460984245205,
+        -275.9285104469687,
+        138.3577518672690,
+        -30.66479806614716,
+        2.506628277459239,
+    )
+    b = (-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572)
+    c = (
+        -0.007784894002430293,
+        -0.3223964580411365,
+        -2.400758277161838,
+        -2.549732539343734,
+        4.374664141464968,
+        2.938163982698783,
+    )
+    d = (0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416)
+    if p < 0.02425:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
+    if p > 1.0 - 0.02425:
+        return -_normal_quantile(1.0 - p)
+    q = p - 0.5
+    r = q * q
+    return (
+        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+        * q
+        / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+    )
+
+
+def _log_ndtr(z: float) -> float:
+    """``log Phi(z)`` (standard normal CDF), stable deep in the lower tail."""
+    if z > -30.0:
+        return math.log(max(0.5 * math.erfc(-z / math.sqrt(2.0)), 1e-300))
+    return -0.5 * z * z - math.log(-z) - 0.5 * math.log(2.0 * math.pi)
+
+
+def _sigma_mixture(sigma: float, dof: float) -> list[tuple[float, float]]:
+    """``[(log weight, sigma_i)]``: ``sigma`` estimated with ``dof`` degrees of freedom, integrated over the chi-square
+    sampling distribution of its variance (Wilson-Hilferty quantiles); a plain ``[(0, sigma)]`` for infinite dof."""
+    if not math.isfinite(dof) or dof <= 0:
+        return [(0.0, sigma)]
+    dof = max(1.0, dof)
+    out: list[tuple[float, float]] = []
+    for p, w in _CHI2_POINTS:
+        z = _normal_quantile(p)
+        c = 2.0 / (9.0 * dof)
+        chi2 = dof * max(1e-6, 1.0 - c + z * math.sqrt(c)) ** 3
+        out.append((math.log(w), sigma * math.sqrt(dof / chi2)))
+    return out
 
 
 def _day_log_sigma(exp_days: Sequence[tuple[float, float]]) -> float:
-    """Robust standard deviation of ``log(total / expected)`` over the active baseline days (MAD × 1.4826, minus the
-    Poisson part). Days off are the day-off mixture's business and are left out; 0 when fewer than 5 days qualify."""
+    """Robust standard deviation of ``log(total / expected)`` over the active baseline days: the variance after
+    winsorizing at the median ± 2.5 robust (MAD) standard deviations, minus the Poisson part. Days off are the
+    day-off mixture's business and are left out; 0 when fewer than 5 days qualify."""
     logs: list[float] = []
     noise: list[float] = []
     for e, t in exp_days:
@@ -2392,8 +2670,12 @@ def _day_log_sigma(exp_days: Sequence[tuple[float, float]]) -> float:
     if len(logs) < 5:
         return 0.0
     center = stats.median(logs)
-    mad = stats.median(abs(x - center) for x in logs)
-    return math.sqrt(max(0.0, (1.4826 * mad) ** 2 - stats.median(noise)))
+    spread = 1.4826 * stats.median(abs(x - center) for x in logs)
+    lo, hi = center - 2.5 * spread, center + 2.5 * spread
+    clipped = [min(hi, max(lo, x)) for x in logs]
+    mean = math.fsum(clipped) / len(clipped)
+    var = math.fsum((x - mean) ** 2 for x in clipped) / (len(clipped) - 1)
+    return math.sqrt(max(0.0, var - stats.median(noise)))
 
 
 def _stay_curve(runs: Sequence[tuple[int, bool]], pi_off: float) -> tuple[float, ...]:
@@ -2402,7 +2684,8 @@ def _stay_curve(runs: Sequence[tuple[int, bool]], pi_off: float) -> tuple[float,
     Kaplan-Meier style (a run still going at the end of the history is censored). Each point is shrunk with
     ``STAY_PRIOR_RUNS`` pseudo-runs toward the previous point (the first one toward the overall continuation rate,
     itself shrunk toward ``pi_off``, i.e. independent days), so where the data thin out the curve carries its last
-    well-supported value forward. Vacations make the curve rise: after three days off, a fourth is likely.
+    well-supported value forward, and the curve never decreases. Vacations make it rise: after three days off, a
+    fourth is likely.
     """
     if not runs:
         return ()
@@ -2414,7 +2697,8 @@ def _stay_curve(runs: Sequence[tuple[int, bool]], pi_off: float) -> tuple[float,
     for n in range(1, STAY_CURVE_DAYS + 1):
         at_risk = sum(1 for length, censored in runs if length > n or (length == n and not censored))
         more = sum(1 for length, _ in runs if length > n)
-        prior = (more + STAY_PRIOR_RUNS * prior) / (at_risk + STAY_PRIOR_RUNS)
+        # never less likely to continue than after fewer days off (small samples make the raw curve dip)
+        prior = max(prior, (more + STAY_PRIOR_RUNS * prior) / (at_risk + STAY_PRIOR_RUNS))
         curve.append(prior)
     return tuple(curve)
 
@@ -2470,16 +2754,29 @@ def _critical_count(evals: Iterable[_KeyEval]) -> int:
     return sum(1 for ev in evals if ev.tier == "critical" and ev.level == "agent")
 
 
+def _quoted(value: str) -> str:
+    """A value for the ``field:"value"`` reproduce hint: backslashes and quotes escaped (Lucene/DQL), so a log source
+    name cannot close the quote and turn the hint into a different query. Host entities are left to the renderer
+    (they may be pseudonymized)."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _esc(component: str) -> str:
+    """Subject component: ``|`` separates components, so it is percent-encoded (a spoofed syslog hostname such as
+    ``dc01|ls:Security`` must not produce the subject, and so the fingerprint, of another key)."""
+    return component.replace("|", "%7C")
+
+
 def _subject(level: str, key: tuple[str, ...]) -> str:
     if level == "tenant":
-        return f"tenant:{key[0]}"
+        return f"tenant:{_esc(key[0])}"
     if level == "log_source":
-        return f"ls:{key[0]}"
+        return f"ls:{_esc(key[0])}"
     if level == "agent":
-        return f"agent:{key[0]}"
+        return f"agent:{_esc(key[0])}"
     if level == "agent_log_source":
-        return f"agent:{key[0]}|ls:{key[1]}"
-    return f"rule:{key[0]}"
+        return f"agent:{_esc(key[0])}|ls:{_esc(key[1])}"
+    return f"rule:{_esc(key[0])}"
 
 
 def _key_dict(level: str, key: tuple[str, ...]) -> dict[str, Any]:
@@ -2644,15 +2941,39 @@ register(
             "es": "Se observaron {observed} eventos frente a unos {expected:,.0f} esperados ({ratio:.0%}); cola "
             "inferior binomial negativa p = {p:.1e} (umbral {alpha:.1e}).",
         },
+        "silence.reason.drop_since": {
+            "en": "Since the drop began (about {since}): {observed} events vs about {expected:,.0f} expected "
+            "({ratio:.0%}).",
+            "es": "Desde que empezó la caída (hacia {since}): {observed} eventos frente a unos {expected:,.0f} "
+            "esperados ({ratio:.0%}).",
+        },
         "silence.reason.decay": {
             "en": "Median of the last 7 days: {recent:,.0f} events/day vs {reference:,.0f} over the {ref_days} "
             "previous days (p = {p:.1e}).",
             "es": "Mediana de los últimos 7 días: {recent:,.0f} eventos/día frente a {reference:,.0f} en los "
             "{ref_days} días anteriores (p = {p:.1e}).",
         },
+        "silence.reason.decay_days": {
+            "en": "Over the last {days} days it sent {ratio:.0%} of the volume expected from the {ref_days} earlier "
+            "days (p = {p:.1e}): a sustained loss the rolling baseline would soon absorb.",
+            "es": "En los últimos {days} días envió el {ratio:.0%} del volumen esperado según los {ref_days} días "
+            "anteriores (p = {p:.1e}): una pérdida sostenida que la línea base móvil pronto absorbería.",
+        },
         "silence.reason.profile": {
             "en": "Profile: {duty}, tier {tier}, {days} days of baseline ({model}), dispersion k = {k:.1f}.",
             "es": "Perfil: {duty}, nivel {tier}, {days} días de línea base ({model}), dispersión k = {k:.1f}.",
+        },
+        "silence.reason.bursty": {
+            "en": "This source is bursty: once quiet it tends to stay quiet (its lulls last about {factor:,.1f}× "
+            "longer than independent hours would give), and the test allows for that.",
+            "es": "Esta fuente funciona a ráfagas: cuando se queda en silencio tiende a seguir así (sus pausas duran "
+            "unas {factor:,.1f} veces más de lo que darían horas independientes), y la prueba lo tiene en cuenta.",
+        },
+        "silence.reason.days_off": {
+            "en": "This source skips whole days now and then (about {share:.0%} of its days, learnt from it and its "
+            "peers), so a missing day weighs less than missing hours.",
+            "es": "Esta fuente se salta días completos de vez en cuando (alrededor del {share:.0%} de sus días, "
+            "aprendido de ella y de sus pares), así que un día sin eventos pesa menos que unas horas sin eventos.",
         },
         "silence.reason.alerts_only": {
             "en": "Measured on alerts only (no archives): this is alert silence, which does not always mean the "
@@ -2685,6 +3006,13 @@ register(
             "connected but its events are not arriving, so log collection is broken.",
             "es": "Según la API de Wazuh el agente está {status} y con un keepalive reciente ({keepalive}): está "
             "conectado pero sus eventos no llegan, así que la recolección de logs está rota.",
+        },
+        "silence.reason.agent_active_alerts": {
+            "en": "The Wazuh API reports the agent as {status} with a recent keepalive ({keepalive}): it is connected, "
+            "so its alerts stopped for another reason (log collection, decoders/rules, or the activity itself).",
+            "es": "Según la API de Wazuh el agente está {status} y con un keepalive reciente ({keepalive}): está "
+            "conectado, así que sus alertas se detuvieron por otro motivo (recolección de logs, decoders/reglas o la "
+            "propia actividad).",
         },
         "silence.reason.agent_disconnected": {
             "en": "The Wazuh API reports the agent as {status} (last keepalive {keepalive}).",

@@ -16,7 +16,10 @@ agent stopped, auditd reconfigured...) so the silence analyzer can escalate a si
 Memory is bounded: counts live in per-key, per-UTC-day arrays of 24 unsigned ints (a sparse key only pays for the
 days it was active), strings are length-capped, and the total number of keys is capped by ``max_keys``. When the cap
 is hit, new keys are dropped (existing keys keep counting), ``truncated`` becomes true and the dropped events are
-counted per level so the analyzer can report the analysis as incomplete (never a false green).
+counted per level so the analyzer can report the analysis as incomplete (never a false green). Host-derived keys
+(``agent``, ``agent_log_source``: syslog hostnames are attacker-controlled) cannot take the last 10% of the cap, so a
+flood of spoofed hostnames cannot starve the rule and log-source keys; side tables (rule sources, event codes) have
+their own global caps.
 
 The indexer path fills the same cube with :meth:`CubeCollector.add_count` from composite aggregations.
 """
@@ -46,6 +49,10 @@ __all__ = [
 
 LEVELS: tuple[str, ...] = ("tenant", "log_source", "agent", "agent_log_source", "rule")
 _ARITY = {"tenant": 1, "log_source": 1, "agent": 1, "agent_log_source": 2, "rule": 1}
+# Host-derived levels: syslog hostnames (predecoder.hostname via the manager) are attacker-controlled, so these levels
+# may not use the last HOST_RESERVE share of max_keys; rules and log sources always find room.
+_HOST_LEVELS = frozenset({"agent", "agent_log_source"})
+HOST_RESERVE = 0.1
 
 MAX_COMPONENT_LEN = 256
 _MIN_TS = 946_684_800.0  # 2000-01-01: anything earlier is a parsing artefact, not an event
@@ -140,6 +147,11 @@ class CubeCollector:
         self._data: dict[str, dict[tuple[str, ...], _KeyStats]] = {level: {} for level in LEVELS}
         self._tenant_key: tuple[str, ...] = (self.tenant_name,)
         self._n_keys = 0
+        self._n_host_keys = 0
+        self._host_cap = self.max_keys - int(self.max_keys * HOST_RESERVE)
+        self._n_pairs = 0
+        self._n_codes = 0
+        self.max_side_entries = 16 * self.max_keys  # rule-source pairs and event codes, each
         self._rule_pairs: dict[str, set[tuple[str, str]]] = {}
         self._rule_pairs_overflow: set[str] = set()
         self._codes: dict[tuple[str, str], set[str]] = {}
@@ -273,13 +285,13 @@ class CubeCollector:
         mapping = self._data[level]
         st = mapping.get(normalized)
         if st is None:
-            if level != "tenant" and self._n_keys >= self.max_keys:
+            if not self._room(level):
                 self.truncated = True
                 self.dropped_events[level] += total
                 return
             st = _KeyStats(first, last, 0, {})
             mapping[normalized] = st
-            self._n_keys += 1
+            self._count_key(level)
         chunks = st.chunks
         for idx in range(first_idx, last_idx + 1):
             count = counts[idx]
@@ -323,14 +335,14 @@ class CubeCollector:
                 target_key = self._tenant_key if level == "tenant" else key
                 existing = mine.get(target_key)
                 if existing is None:
-                    if level != "tenant" and self._n_keys >= self.max_keys:
+                    if not self._room(level):
                         self.truncated = True
                         self.dropped_keys[level] += 1
                         self.dropped_events[level] += st.total
                         continue
                     existing = _KeyStats(st.first, st.last, 0, {})
                     mine[target_key] = existing
-                    self._n_keys += 1
+                    self._count_key(level)
                 existing.first = min(existing.first, st.first)
                 existing.last = max(existing.last, st.last)
                 existing.total += st.total
@@ -459,6 +471,19 @@ class CubeCollector:
             raise ValueError("key components must be non-empty")
         return tuple(normalize_component(part) for part in key)
 
+    def _room(self, level: str) -> bool:
+        """Whether a new key may be created at ``level`` (the tenant key always can)."""
+        if level == "tenant":
+            return True
+        if self._n_keys >= self.max_keys:
+            return False
+        return level not in _HOST_LEVELS or self._n_host_keys < self._host_cap
+
+    def _count_key(self, level: str) -> None:
+        self._n_keys += 1
+        if level in _HOST_LEVELS:
+            self._n_host_keys += 1
+
     def _bump(
         self,
         mapping: dict[tuple[str, ...], _KeyStats],
@@ -472,14 +497,14 @@ class CubeCollector:
     ) -> bool:
         st = mapping.get(key)
         if st is None:
-            if level != "tenant" and self._n_keys >= self.max_keys:
+            if not self._room(level):
                 self.truncated = True
                 self.dropped_events[level] += count
                 return False
             st = _KeyStats(first, last, 0, {})
             mapping[key] = st
             if level != "tenant" or len(mapping) == 1:
-                self._n_keys += 1
+                self._count_key(level)
         chunk = st.chunks.get(day)
         if chunk is None:
             chunk = array("I", _ZERO_DAY)
@@ -505,10 +530,11 @@ class CubeCollector:
             self._rule_pairs[rule] = pairs
         if (agent, ls) in pairs:
             return
-        if len(pairs) >= self.max_rule_pairs:
+        if len(pairs) >= self.max_rule_pairs or self._n_pairs >= self.max_side_entries:
             self._rule_pairs_overflow.add(rule)
             return
         pairs.add((agent, ls))
+        self._n_pairs += 1
 
     def _add_code(self, pair: tuple[str, str], code: str) -> None:
         codes = self._codes.get(pair)
@@ -517,8 +543,11 @@ class CubeCollector:
                 return
             codes = set()
             self._codes[pair] = codes
-        if len(codes) < self.max_event_codes:
-            codes.add(normalize_component(code)[:64])
+        if len(codes) < self.max_event_codes and self._n_codes < self.max_side_entries:
+            value = normalize_component(code)[:64]
+            if value not in codes:
+                codes.add(value)
+                self._n_codes += 1
 
     def _detect_precursor(self, event: Event, agent: str | None, ls: str | None, t: float) -> None:
         code_name: str | None = None

@@ -52,6 +52,7 @@ MAX_HOSTS_IN_EVIDENCE = 50
 MIX_CHANGE_RATIO = 0.5  # daily volume after/before below this: the loss may come from what is sent, not how
 SHARED_MIN_HOSTS = 2  # a field lost on at least this many hosts of one log source is reported once, for the source
 HORIZON_EXTRA_DAYS = 3
+MIN_EVICTED_SHARE = 0.05  # days below this share of an average kept day are evicted first (forged/skewed dates)
 OVERFLOW = "\x00overflow"  # hosts beyond max_keys: they feed the log-source totals but are never reported alone
 
 # Fields detection rules commonly depend on: losing one of them is a detection blind spot (high severity).
@@ -264,7 +265,16 @@ class FieldCollector:
                 if day < oldest:
                     src.dropped_days += 1
                     return None
-                self._drop_day(src, oldest)
+                # A negligible day (a few events with forged or skewed far-away dates) goes first; otherwise the oldest
+                # day rotates out. Rotating out real history while the table also holds far-away days means the
+                # baseline is being pushed out: reported as truncation, never a silent false green.
+                victim = min(src.agg, key=lambda d: (src.agg[d][0], d))
+                average = sum(row[0] for row in src.agg.values()) / len(src.agg)
+                if src.agg[victim][0] >= MIN_EVICTED_SHARE * average:
+                    victim = oldest
+                    if max(src.agg) - oldest >= self.max_days:
+                        src.truncated = True
+                self._drop_day(src, victim)
             agg = array("Q", [0]) * width
             src.agg[day] = agg
         elif len(agg) < width:
@@ -278,7 +288,7 @@ class FieldCollector:
         return row, agg
 
     def _drop_day(self, src: _Source, day: int) -> None:
-        """Forget the oldest day of a log source (bounded history; the analysis only looks at the baseline)."""
+        """Forget one day of a log source (bounded history; the analysis only looks at the baseline)."""
         src.dropped_days += 1
         del src.agg[day]
         for host in src.hosts.values():
@@ -511,6 +521,7 @@ def analyze_fields(
         "lost": rows_out[:MAX_LOST_IN_SECTION],
         "truncated": collector.truncated or any(s.truncated for s in collector._sources.values()),
         "overflow_events": collector.overflow_events,
+        "dropped_days": sum(s.dropped_days for s in collector._sources.values()),
     }
     return findings, section
 
@@ -656,9 +667,15 @@ def _field_reasons(items: list[_Lost], basis: DataBasis | None) -> tuple[list[Me
     return reasons, low
 
 
+def _esc(component: str) -> str:
+    """Subject component: ``|`` and ``,`` separate components and field lists, so they are percent-encoded (field
+    and host names come from attacker-controllable documents and must not forge another finding's subject)."""
+    return component.replace("|", "%7C").replace(",", "%2C")
+
+
 def _subject(prefix: str, items: list[_Lost]) -> str:
     """``agent:<host>|ls:<source>|field:<name>`` (or ``fields:a,b,...`` when one change dropped several)."""
-    names = sorted({i.field for i in items})
+    names = sorted({_esc(i.field) for i in items})
     if len(names) == 1:
         return f"{prefix}|field:{names[0]}"
     shown = ",".join(names[:10])
@@ -692,7 +709,7 @@ def _host_finding(ls: str, host: str, items: list[_Lost], tenant: TenantConfig, 
         domain="silence",
         title=title,
         severity=severity,
-        subject=_subject(f"agent:{host}|ls:{ls}", items),
+        subject=_subject(f"agent:{_esc(host)}|ls:{_esc(ls)}", items),
         reasons=reasons,
         evidence={
             "level": "agent_log_source",
@@ -739,7 +756,7 @@ def _wide_finding(
         domain="silence",
         title=title,
         severity=severity,
-        subject=_subject(f"ls:{ls}", items),
+        subject=_subject(f"ls:{_esc(ls)}", items),
         reasons=reasons,
         evidence={
             "level": "log_source",

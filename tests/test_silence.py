@@ -17,6 +17,7 @@ import random
 import time
 from collections.abc import Callable, Iterable, Iterator
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from typing import Any
 
 import pytest
@@ -160,6 +161,24 @@ class World:
             entry[1] = min(entry[1], first)
             entry[2] = max(entry[2], last)
 
+    def add_counts(self, agent: str, ls: str, counts: list[int]) -> None:
+        """Add a stream given as explicit hourly counts (for shapes ``stream`` cannot express)."""
+        first = next((h for h, c in enumerate(counts) if c), None)
+        if first is None:
+            return
+        last = max(h for h, c in enumerate(counts) if c)
+        for key in (
+            ("agent_log_source", (agent, ls)),
+            ("agent", (agent,)),
+            ("log_source", (ls,)),
+            ("tenant", (self.tenant.name,)),
+        ):
+            entry = self._agg.setdefault(key, [[0] * self.hours, math.inf, -math.inf])
+            for h, c in enumerate(counts):
+                entry[0][h] += c
+            entry[1] = min(entry[1], (self.start_h + first) * 3600.0 + 1.0)
+            entry[2] = max(entry[2], (self.start_h + last) * 3600.0 + 3500.0)
+
     def build(self, cube: CubeCollector | None = None) -> CubeCollector:
         cube = cube or CubeCollector(self.tenant)
         for (level, key), (counts, first, last) in sorted(self._agg.items()):
@@ -288,7 +307,7 @@ def test_volume_drop_is_detected_and_attributed_to_the_channel() -> None:
             "Security",
             40.0,
             pattern="sine",
-            factor=(lambda h, cut=drop_from: 0.1 if h >= cut else 1.0) if i == 4 else None,
+            factor=partial(lambda cut, h: 0.1 if h >= cut else 1.0, drop_from) if i == 4 else None,
         )
     cube = world.build()
     result = run(world, cube, world.end)
@@ -1032,3 +1051,300 @@ def test_findings_and_section_are_strict_json() -> None:
         assert "1970-01-01" not in text
     json.dumps(result.section, default=default, allow_nan=False)
     json.dumps({f"{level}|{'|'.join(key)}": v for (level, key), v in result.statuses.items()}, allow_nan=False)
+
+
+# ---- review regressions: shapes the calibration above does not cover -------------------------------------------
+
+
+def on_off(rng: random.Random, hours: int, rate: float, mean_on: float, mean_off: float) -> list[int]:
+    """Bursty source: a two-state (on/off) Markov chain with geometric on and off periods."""
+    on = True
+    out = []
+    for _ in range(hours):
+        out.append(nb(rng, rate, 3.0) if on else 0)
+        if on and rng.random() < 1.0 / mean_on:
+            on = False
+        elif not on and rng.random() < 1.0 / mean_off:
+            on = True
+    return out
+
+
+def test_bursty_on_off_sources_do_not_cry_wolf_and_still_get_caught() -> None:
+    """Independent-hour P0 read the normal lulls of on/off sources as outages (~10 alarms per run at the default
+    budget before the burstiness correction); a dead bursty source is still reported."""
+    tenant = TenantConfig(name="acme", timezone="Europe/Madrid")
+    world = World(tenant, hours=24 * 24, seed=11)
+    rng = random.Random(5)
+    dead = world.hours - 72
+    for i in range(40):
+        counts = on_off(rng, world.hours, rng.uniform(8, 40), rng.uniform(2, 8), rng.uniform(1, 8))
+        if i == 0:
+            counts[dead:] = [0] * (world.hours - dead)
+        world.add_counts(f"app-{i:02d}.example", "Application", counts)
+    cube = world.build()
+    false_alarms = 0
+    for back in (0, 9, 17, 26, 35, 44):
+        result = run(world, cube, world.end - timedelta(hours=back))
+        false_alarms += sum(1 for f in alarms(result) if "app-00" not in f.subject)
+    assert false_alarms <= 1, false_alarms
+    result = run(world, cube, world.end)
+    assert ("silence.silent", "agent:app-00.example") in describe(alarms(result))
+    bursty = [row for row in result.section["sources"] if row["level"] == "agent"]
+    assert bursty and any(
+        isinstance(r, Message) and r.key == "silence.reason.bursty" for r in alarms(result)[0].reasons
+    )
+
+
+def test_heavy_day_to_day_swings_are_calibrated_and_outages_still_found() -> None:
+    """Lognormal day multipliers (sd 0.6): the weekday factors of a two-week baseline absorb part of the swings and the
+    hourly P0 ignored them (about 1 false alarm per run before the fix)."""
+    tenant = TenantConfig(name="acme", timezone="Europe/Madrid")
+    world = World(tenant, hours=24 * 24, seed=21)
+    rng = random.Random(21)
+    days = sorted({d for _, _, d in world.local})
+    stop = world.end - timedelta(hours=6)
+    for i in range(80):
+        swing = {d: math.exp(rng.gauss(-0.18, 0.6)) for d in days}
+        world.stream(
+            f"srv-{i:02d}.example",
+            "Security",
+            rng.uniform(5, 60),
+            pattern="sine",
+            k=rng.uniform(3, 20),
+            factor=partial(lambda s, h: s[world.local[h][2]], swing),
+            stop=stop if i == 0 else None,
+        )
+    cube = world.build()
+    false_alarms = 0
+    for back in (0, 11, 23, 37, 50, 61):
+        result = run(world, cube, world.end - timedelta(hours=back))
+        false_alarms += sum(1 for f in alarms(result) if "srv-00" not in f.subject)
+    assert false_alarms <= 1, false_alarms
+    found = describe(alarms(run(world, cube, world.end)))
+    assert ("silence.silent", "agent:srv-00.example") in found, found
+
+
+def test_one_off_spike_day_does_not_make_next_week_a_drop() -> None:
+    """A single 6x day in the baseline taught the weekday factor that every such weekday is heavy."""
+    tenant = TenantConfig(name="acme")
+    tenant.silence.alarm_budget = TRAP_BUDGET
+    world = World(tenant, hours=21 * 24, seed=4)
+    spike_day = world.local[9 * 24][2]  # a Wednesday of week 2
+    for i in range(10):
+        world.stream(
+            f"fw-{i:02d}.example",
+            "syslog",
+            80.0,
+            k=8.0,
+            factor=(lambda h: 6.0 if world.local[h][2] == spike_day else 1.0) if i == 3 else None,
+        )
+    cube = world.build()
+    same_weekday = MONDAY + timedelta(days=16, hours=20)  # the next Wednesday, evening
+    for now in (same_weekday, same_weekday + timedelta(hours=4)):
+        assert alarms(run(world, cube, now)) == [], now
+
+
+def test_weekly_batch_job_is_not_an_outage() -> None:
+    """A Sunday 03:00 batch plus a trickle: the separable hour x weekday profile expected the batch every night
+    and the Sunday volume all day long."""
+    tenant = TenantConfig(name="acme")
+    tenant.silence.alarm_budget = TRAP_BUDGET
+    world = World(tenant, hours=20 * 24 + 12, seed=8)
+    for i in range(5):
+        world.stream(
+            f"bk-{i:02d}.example",
+            "/var/log/weekly.log",
+            1.0,
+            k=3.0,
+            factor=lambda h: 800.0 if (world.local[h][1] == 6 and world.local[h][0] == 3) else 0.1,
+        )
+        world.stream(f"bk-{i:02d}.example", "/var/log/syslog", 20.0, pattern="sine")
+    cube = world.build()
+    for back in range(0, 7 * 24, 11):
+        now = world.end - timedelta(hours=back)
+        assert alarms(run(world, cube, now)) == [], now
+
+
+def test_day_off_tolerance_learnt_from_laptops_never_hides_a_critical_server() -> None:
+    """A critical DC seen through alerts only (bursty, not "always on") inherited the day-off habit of critical
+    executive laptops and its outage at 22:00 went unreported for 30-60 hours."""
+    tenant = TenantConfig(name="acme", timezone="Europe/Madrid", criticality={"critical": ["dc*", "exec-*"]})
+    world = World(tenant, hours=26 * 24, start=MONDAY - timedelta(hours=2), seed=3)
+    dates = sorted({d for _, _, d in world.local})
+    for i in range(30):
+        off = {d for d in dates if d.weekday() < 5 and world.rng.random() < 0.3}
+        world.stream(f"exec-{i:02d}.example", "Security", 6.0, pattern="laptop", weekend=0.0, holidays=off, k=2.0)
+    stop = MONDAY - timedelta(hours=2) + timedelta(days=24, hours=22)  # 22:00 local
+    for i in range(3):
+        world.stream(f"dc{i:02d}.corp.example", "Security", 1.8, pattern="sine", k=0.7, stop=stop if i == 0 else None)
+    cube = world.build()
+    alerts = DataBasis(input_kind="alerts", profile="wazuh4")
+    result = run(world, cube, stop + timedelta(hours=16), alerts)
+    found = [f for f in alarms(result) if "dc00" in f.subject]
+    assert found and found[0].severity is Severity.CRITICAL, describe(alarms(result))
+    assert found[0].evidence["off_day_probability"] == 0.0
+
+
+def test_every_agent_losing_most_of_its_volume_is_one_pipeline_finding() -> None:
+    """An EPS limit / queue problem: every agent keeps sending 20% (was one DROP finding per agent and channel)."""
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24, seed=6)
+    cut = world.hours - 10
+    for i in range(20):
+        for ls, rate in (("Security", 30.0), ("System", 8.0)):
+            world.stream(f"srv-{i:02d}.example", ls, rate, pattern="sine", factor=lambda h: 0.2 if h >= cut else 1.0)
+    cube = world.build()
+    found = alarms(run(world, cube, world.end))
+    assert describe(found) == [("pipeline.global_silence", "global_silence")]
+    assert found[0].evidence["agents_dropped"] >= 6
+    title = found[0].title
+    assert isinstance(title, Message) and title.key in ("silence.title.global_mixed", "silence.title.global_drop")
+
+
+def test_one_channel_dropping_on_every_host_is_one_log_source_finding() -> None:
+    """Sysmon losing 90% on every host (a pushed config) was one finding per host."""
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24, seed=7)
+    cut = world.hours - 12
+    for i in range(15):
+        name = f"ws-{i:02d}.corp.example"
+        world.stream(name, "Security", 10.0, pattern="sine")
+        world.stream(name, SYSMON, 60.0, pattern="sine", factor=lambda h: 0.1 if h >= cut else 1.0)
+    cube = world.build()
+    assert describe(alarms(run(world, cube, world.end))) == [("silence.drop", f"ls:{SYSMON}")]
+
+
+def test_a_host_losing_every_channel_is_one_host_finding() -> None:
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24, seed=8)
+    cut = world.hours - 14
+    for i in range(10):
+        factor = (lambda h: 0.1 if h >= cut else 1.0) if i == 4 else None
+        world.stream(f"srv-{i:02d}.example", "Security", 30.0, pattern="sine", factor=factor)
+        world.stream(f"srv-{i:02d}.example", SYSMON, 40.0, pattern="sine", factor=factor)
+        world.stream(f"srv-{i:02d}.example", "System", 6.0, factor=factor)
+    cube = world.build()
+    assert describe(alarms(run(world, cube, world.end))) == [("silence.drop", "agent:srv-04.example")]
+
+
+def test_audit_policy_change_mid_hour_then_97pct_drop_is_tampering_hours_later() -> None:
+    """The DROP change point is known to the hour (a 14:40 change can be dated 14:00) and the whole-window test only
+    fired about a day later: the precursor window missed it and the drop showed as plain silence or nothing."""
+    tenant = TenantConfig(name="acme", criticality={"critical": ["dc*"]})
+    world = World(tenant, hours=21 * 24, seed=9)
+    cut = world.hours - 8
+    servers(world, 6)
+    world.stream("dc02.corp.example", "System", 5.0)
+    world.stream(
+        "dc02.corp.example",
+        "Security",
+        100.0,
+        pattern="sine",
+        factor=lambda h: 0.03 if h >= cut else (40 / 60 + 0.03 * 20 / 60 if h == cut - 1 else 1.0),
+    )
+    cube = world.build()
+    change = datetime.fromtimestamp((world.start_h + cut - 1) * 3600 + 40 * 60, UTC)
+    cube.add(Event(ts=change, source="dc02.corp.example", log_source="Security", rule_id="60112", event_code="4719"))
+    found = alarms(run(world, cube, world.end))
+    assert describe(found) == [("silence.tampering", "agent:dc02.corp.example|ls:Security")], describe(found)
+    assert found[0].severity is Severity.CRITICAL
+
+
+def test_laptops_on_vacation_are_not_outages() -> None:
+    """Days off come in runs: a laptop away for a week or two is not an outage (the independent-days mixture made
+    every vacation a HIGH finding)."""
+    tenant = TenantConfig(name="acme", timezone="Europe/Madrid")
+    world = World(tenant, hours=28 * 24, start=MONDAY - timedelta(hours=2), seed=12)
+    dates = sorted({d for _, _, d in world.local})
+    rng = random.Random(12)
+    for i in range(30):
+        off = {d for d in dates if d.weekday() < 5 and rng.random() < 0.08}
+        if rng.random() < 0.4:
+            first = rng.randrange(0, len(dates) - 12)
+            off |= set(dates[first : first + rng.randint(7, 12)])
+        world.stream(
+            f"lap-{i:02d}.example", "Security", rng.uniform(5, 20), pattern="laptop", weekend=0.0, holidays=off
+        )
+    cube = world.build()
+    false_alarms = 0
+    for back in (3, 19, 40, 66, 90, 115, 140):
+        false_alarms += len(alarms(run(world, cube, world.end - timedelta(hours=back))))
+    assert false_alarms <= 1, false_alarms
+
+
+def test_a_connected_agent_gets_no_day_off_tolerance() -> None:
+    """The Wazuh API says the agent is up (fresh keepalive): its silence cannot be a day off."""
+    tenant = TenantConfig(name="acme", timezone="Europe/Madrid")
+    world = World(tenant, hours=24 * 24, start=MONDAY - timedelta(hours=2), seed=13)
+    dates = sorted({d for _, _, d in world.local})
+    for i in range(20):
+        off = {d for d in dates if d.weekday() < 5 and world.rng.random() < 0.2}
+        stop = MONDAY - timedelta(hours=2) + timedelta(days=22, hours=0) if i == 0 else None
+        world.stream(f"lap-{i:02d}.example", "Security", 12.0, pattern="laptop", weekend=0.0, holidays=off, stop=stop)
+    cube = world.build()
+    now = MONDAY - timedelta(hours=2) + timedelta(days=22, hours=12)  # Wednesday noon, silent since midnight
+    up = AgentInfo(id="001", name="lap-00.example", status="active", last_keepalive=now - timedelta(minutes=1))
+    assert not [f for f in alarms(run(world, cube, now)) if "lap-00" in f.subject]  # could be a day off
+    found = [f for f in alarms(run(world, cube, now, agents=[up])) if "lap-00" in f.subject]
+    assert found and found[0].evidence["off_day_probability"] == 0.0
+    # an API snapshot taken long after an old export says nothing about that export's past
+    later = AgentInfo(id="001", name="lap-00.example", status="active", last_keepalive=now + timedelta(days=30))
+    assert not [f for f in alarms(run(world, cube, now, agents=[later])) if "lap-00" in f.subject]
+
+
+def test_rule_dark_on_alerts_only_is_not_high_confidence() -> None:
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24)
+    for i in range(6):
+        world.stream(f"srv-{i:02d}.example", "Security", 12.0, rule="60106", stop=world.end - timedelta(hours=10))
+        world.stream(f"srv-{i:02d}.example", "Security", 10.0)
+    cube = world.build()
+    dark = [
+        f for f in alarms(run(world, cube, world.end, DataBasis(input_kind="alerts"))) if f.kind == "silence.rule_dark"
+    ]
+    assert dark and dark[0].confidence is Confidence.MEDIUM
+    mixed = [
+        f for f in alarms(run(world, cube, world.end, DataBasis(input_kind="mixed"))) if f.kind == "silence.rule_dark"
+    ]
+    assert mixed and mixed[0].confidence is Confidence.HIGH
+
+
+def test_subject_separators_in_names_cannot_forge_another_subject() -> None:
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24)
+    servers(world, 5)
+    world.stream("dc01|ls:Security", "syslog", 30.0, stop=world.end - timedelta(hours=8))
+    cube = world.build()
+    subjects = [f.subject for f in alarms(run(world, cube, world.end))]
+    assert subjects == ["agent:dc01%7Cls:Security"]
+    assert fingerprint("acme", "silence.silent", subjects[0]) != fingerprint(
+        "acme", "silence.silent", "agent:dc01|ls:Security"
+    )
+
+
+def test_burstiness_estimate_survives_huge_batch_hours() -> None:
+    """exp() of a batch hour's cost (thousands of expected events) overflowed and crashed the whole analysis."""
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24, seed=14)
+    for i in range(3):
+        world.stream(
+            f"bk-{i:02d}.example", "/var/log/backup.log", 1.0, k=50.0, factor=lambda h: 5000.0 if h % 24 == 2 else 0.0
+        )
+        world.add_counts(f"bk-{i:02d}.example", "/var/log/app.log", on_off(random.Random(i), world.hours, 900.0, 3, 3))
+    cube = world.build()
+    result = run(world, cube, world.end)
+    assert result.section["keys_evaluated"] > 0
+
+
+def test_reproduce_hint_escapes_quotes_in_log_source_names() -> None:
+    tenant = TenantConfig(name="acme")
+    world = World(tenant, hours=21 * 24)
+    servers(world, 5)
+    hostile = 'app" OR agent.name:* OR "x'
+    world.stream("srv-00.example", hostile, 30.0, stop=world.end - timedelta(hours=8))
+    cube = world.build()
+    found = alarms(run(world, cube, world.end))
+    assert found and found[0].recommendation is not None
+    text = render(found[0].recommendation, "en")
+    assert 'app\\" OR agent.name:* OR \\"x' in text
+    assert found[0].evidence["reproduce"]["filter"]["location"] == hostile  # structured filter keeps the raw value

@@ -379,3 +379,42 @@ def test_empty_collector() -> None:
     assert findings == [] and section["status"] == "not_assessed"
     with pytest.raises(ValueError):
         FieldCollector(tenant, max_fields_per_source=0)
+
+
+def test_forged_far_future_dates_cannot_push_the_baseline_out() -> None:
+    """A few events with forged dates (a spoofed or skewed device) used to evict the oldest real days, silently
+    losing the baseline: the field loss went unreported and the section said nothing was truncated."""
+    tenant = TenantConfig(name="acme")
+    rng = random.Random(1)
+    collector = FieldCollector(tenant)
+    for day in range(28):
+        for i in range(200):
+            ts = START + timedelta(days=day, seconds=(86400 / 200) * i)
+            collector.add(fw_event(ts, rng, with_srcip=day < 20))
+            if day == 25 and i < 40:
+                collector.add(fw_event(START + timedelta(days=400 + i), rng))
+    findings, section = analyze_fields(collector, tenant=tenant, now=START + timedelta(days=28))
+    assert [f.kind for f in findings] == ["silence.field_lost"]
+    assert section["dropped_days"] > 0
+    # heavy forged days that push real history out are reported as truncation instead of a silent gap
+    heavy = FieldCollector(tenant)
+    for day in range(28):
+        for i in range(50):
+            heavy.add(fw_event(START + timedelta(days=day, seconds=1700 * i), rng))
+    for j in range(40):
+        for i in range(50):
+            heavy.add(fw_event(START + timedelta(days=500 + j, seconds=1700 * i), rng))
+    assert analyze_fields(heavy, tenant=tenant, now=START + timedelta(days=28))[1]["truncated"] is True
+
+
+def test_field_subjects_escape_separators() -> None:
+    tenant = TenantConfig(name="acme")
+    collector = FieldCollector(tenant)
+    for day in range(28):
+        for i in range(120):
+            fields = {"data.x|ls:Security": "1", "data.a,b": "2", "keep": "3"} if day < 20 else {"keep": "3"}
+            collector.add(
+                Event(ts=START + timedelta(days=day, seconds=600 * i), source="h|1", log_source="app", fields=fields)
+            )
+    findings, _ = analyze_fields(collector, tenant=tenant, now=START + timedelta(days=28))
+    assert [f.subject for f in findings] == ["agent:h%7C1|ls:app|fields:data.a%2Cb,data.x%7Cls:Security"]

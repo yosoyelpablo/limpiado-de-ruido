@@ -292,7 +292,7 @@ def nb_logcdf(x: int | float, mu: float, k: float) -> float:
     )
 
 
-_SUM_MAX_TERMS = 200_000
+_SUM_MAX_TERMS = 4_000  # beyond this the incomplete beta function is faster (both are exact)
 
 
 def _nb_logcdf_by_summation(n: int, mu: float, k: float) -> float | None:
