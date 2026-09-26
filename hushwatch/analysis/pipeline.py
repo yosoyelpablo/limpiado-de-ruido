@@ -117,6 +117,10 @@ register(
             "en": "Not evaluated with this input: {analyses}.",
             "es": "No evaluado con esta entrada: {analyses}.",
         },
+        "pipeline.join.0": {"en": "-", "es": "-"},
+        "pipeline.join.1": {"en": "{a}", "es": "{a}"},
+        "pipeline.join.2": {"en": "{a}; {b}", "es": "{a}; {b}"},
+        "pipeline.join.3": {"en": "{a}; {b}; {c}", "es": "{a}; {b}; {c}"},
         "pipeline.basis.sampled": {
             "en": "The input is a sample: the absence of a source or event type cannot be proven from it.",
             "es": "La entrada es una muestra: con ella no se puede demostrar la ausencia de una fuente o tipo de "
@@ -235,6 +239,13 @@ register(
             "indexer, Filebeat/Logstash) rather than to the sources. Worst: {hosts}.",
             "es": "La mayoría de los orígenes llegan tarde a la vez, lo que apunta a un atasco compartido (colas "
             "del manager, indexador, Filebeat/Logstash) más que a los orígenes. Los peores: {hosts}.",
+        },
+        "pipeline.lag.reason.global_generic": {
+            "en": "Most sources are late at the same time, which points to a shared backlog (collectors, forwarders, "
+            "ingest pipeline, indexer) rather than to the sources. Worst: {hosts}.",
+            "es": "La mayoría de los orígenes llegan tarde a la vez, lo que apunta a un atasco compartido "
+            "(recolectores, reenviadores, canalización de ingesta, indexador) más que a los orígenes. Los peores: "
+            "{hosts}.",
         },
         "pipeline.lag.reason.sources": {
             "en": "These sources are late on their own rather than all at once, which is typical of hosts that are "
@@ -870,10 +881,12 @@ def analyze_pipeline(
         checks.append(row)
         if finding is not None:
             findings.append(finding)
+    wazuh = _is_wazuh(basis)
     daemon_findings, daemon_row = _daemon_check(daemon_stats)
     findings.extend(daemon_findings)
-    checks.append(daemon_row)
-    lag_findings, lag_row = _lag_check(lag_samples, tenant)
+    if wazuh or daemon_stats is not None:  # a Wazuh manager check means nothing for Elastic / generic input
+        checks.append(daemon_row)
+    lag_findings, lag_row = _lag_check(lag_samples, tenant, wazuh=wazuh)
     findings.extend(lag_findings)
     checks.append(lag_row)
     for finding in findings:
@@ -899,11 +912,11 @@ def _basis_check(basis: DataBasis) -> tuple[Finding | None, dict[str, Any]]:
     reasons: list[Message | str] = []
     triggers: list[str] = []
     severity: Severity | None = None
-    failures = [str(p) for p in basis.partial_failures]
+    # translatable messages (ingest / indexer / API failures) or plain strings
+    failures = [p if isinstance(p, Message) else _clip(str(p)) for p in basis.partial_failures]
     if failures:
         triggers.append("partial_failures")
-        examples = "; ".join(_clip(p) for p in failures[:3])
-        reasons.append(M("pipeline.basis.partial", count=len(failures), examples=examples))
+        reasons.append(M("pipeline.basis.partial", count=len(failures), examples=_joined(failures[:3])))
         severity = Severity.HIGH
     if basis.truncated:
         triggers.append("truncated")
@@ -955,7 +968,7 @@ def _basis_check(basis: DataBasis) -> tuple[Finding | None, dict[str, Any]]:
             "triggers": triggers,
             "events": basis.events,
             "partial_failures": len(failures),
-            "partial_failure_examples": [_clip(p) for p in failures[:5]],
+            "partial_failure_examples": failures[:5],
             "truncated": basis.truncated,
             "sampled": basis.sampled,
             "bad_timestamps": bad,
@@ -966,6 +979,13 @@ def _basis_check(basis: DataBasis) -> tuple[Finding | None, dict[str, Any]]:
         confidence=Confidence.HIGH,
     )
     return finding, row
+
+
+def _joined(items: Sequence[Message | str]) -> Message:
+    """Up to three messages (or texts) as one "a; b; c" message (rendered in the report's language)."""
+    names = ("a", "b", "c")
+    shown = list(items[:3])
+    return M(f"pipeline.join.{len(shown)}", **dict(zip(names, shown, strict=False)))
 
 
 def _skew_check(basis: DataBasis) -> tuple[Finding | None, dict[str, Any]]:
@@ -1182,7 +1202,13 @@ def _profile(source: str, values: Sequence[Any]) -> _LagProfile | None:
     return profile
 
 
-def _lag_check(lag_samples: Any, tenant: TenantConfig) -> tuple[list[Finding], dict[str, Any]]:
+def _is_wazuh(basis: DataBasis) -> bool:
+    """Whether the input comes from Wazuh (Wazuh-specific checks and advice apply). Mixed or unknown input keeps
+    them: it may be Wazuh."""
+    return basis.profile in ("wazuh4", "wazuh5", "mixed", "unknown") or basis.input_kind == "mixed"
+
+
+def _lag_check(lag_samples: Any, tenant: TenantConfig, *, wazuh: bool = True) -> tuple[list[Finding], dict[str, Any]]:
     row: dict[str, Any] = {"check": "ingest_lag", "threshold_seconds": LAG_P95_THRESHOLD_S}
     profiles: list[_LagProfile] = []
     if isinstance(lag_samples, Mapping):
@@ -1204,7 +1230,7 @@ def _lag_check(lag_samples: Any, tenant: TenantConfig) -> tuple[list[Finding], d
         if p.kind == "tz_offset":
             offsets.setdefault(p.offset_hours, []).append(p)
     findings: list[Finding] = []
-    findings.extend(_lag_findings(lagging, total, tenant))
+    findings.extend(_lag_findings(lagging, total, tenant, wazuh=wazuh))
     findings.extend(_ahead_findings(ahead, total))
     for hours, members in sorted(offsets.items()):
         findings.extend(_tz_findings(hours, members, total))
@@ -1248,7 +1274,7 @@ def _tier_sla(tenant: TenantConfig, tier: str) -> timedelta:
     return DEFAULT_SLA.get(tier, DEFAULT_SLA["standard"])
 
 
-def _lag_findings(lagging: list[_LagProfile], total: int, tenant: TenantConfig) -> list[Finding]:
+def _lag_findings(lagging: list[_LagProfile], total: int, tenant: TenantConfig, *, wazuh: bool) -> list[Finding]:
     if not lagging:
         return []
 
@@ -1268,7 +1294,9 @@ def _lag_findings(lagging: list[_LagProfile], total: int, tenant: TenantConfig) 
         critical = [p.entity for p in ordered if tier(p) == "critical"]
         reasons: list[Message | str] = [
             M(
-                "pipeline.lag.reason.global" if shared else "pipeline.lag.reason.sources",
+                ("pipeline.lag.reason.global" if wazuh else "pipeline.lag.reason.global_generic")
+                if shared
+                else "pipeline.lag.reason.sources",
                 hosts=[p.entity for p in ordered[:5]],
             )
         ]

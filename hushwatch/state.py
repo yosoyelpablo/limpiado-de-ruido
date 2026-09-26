@@ -23,7 +23,9 @@ counters and a *placeholder* summary of the title (entity values and free-text p
 ``[kind]`` markers). It never stores raw subjects, entity values or evidence.
 
 The store is a single SQLite file in WAL mode (file 0600, directories created 0700; shared directories and
-symlinks are refused). Every run is one ``BEGIN IMMEDIATE`` transaction with a busy timeout, so concurrent runs
+symlinks are refused). Callers that own a state *directory* use :func:`prepare_state_dir` first (it creates the
+directory, or migrates a database an older version wrongly created at the directory path) and open
+``state_dir / STATE_FILENAME``. Every run is one ``BEGIN IMMEDIATE`` transaction with a busy timeout, so concurrent runs
 on the same file serialize safely.
 
 Integration note (never a false green): pass ``assessed`` to :meth:`StateStore.record_run` (the domains the
@@ -54,9 +56,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from .config import ConfigError
+from .config import ConfigError, YamlError, safe_yaml_load
 from .i18n import Entity, M, Message, register, render
 from .models import DOMAINS, Finding, Severity, stable_hash
 from .redact import Redactor
@@ -180,7 +180,7 @@ register(
             "en": "entry {n}: 'expires' is mandatory (YYYY-MM-DD, at most {max_days} days ahead): "
             "every acceptance must expire and be reviewed again",
             "es": "entrada {n}: 'expires' es obligatorio (AAAA-MM-DD, como máximo {max_days} días en el futuro): "
-            "toda aceptación debe caducar y volver a revisarse",
+            "toda aceptación debe vencer y volver a revisarse",
         },
         "state.accept.expires_invalid": {
             "en": "entry {n}: 'expires' must be a date (YYYY-MM-DD) or an ISO-8601 timestamp",
@@ -194,12 +194,12 @@ register(
         },
         "state.accept.expired_detail": {
             "en": "acceptance by {owner} expired on {expires}; this finding is reported again",
-            "es": "la aceptación de {owner} caducó el {expires}; este hallazgo vuelve a notificarse",
+            "es": "la aceptación de {owner} venció el {expires}; este hallazgo vuelve a notificarse",
         },
         "state.accept.expired_unmatched": {
             "en": "Accept entry #{index} (owner {owner}) expired on {expires} and matches no current finding: "
             "review it or remove it from the accept file",
-            "es": "La entrada de aceptación n.º {index} (responsable {owner}) caducó el {expires} y no coincide "
+            "es": "La entrada de aceptación n.º {index} (responsable {owner}) venció el {expires} y no coincide "
             "con ningún hallazgo actual: revísela o elimínela del archivo de aceptaciones",
         },
         "state.flapping.detail": {
@@ -235,6 +235,23 @@ register(
         "state.error.not_regular": {
             "en": "Refusing to use {path} as state: it is a symbolic link or not a regular file",
             "es": "No se usa {path} como estado: es un enlace simbólico o no es un archivo normal",
+        },
+        "state.error.not_dir": {
+            "en": "The state directory {path} exists but is not a directory; set state_dir to a directory",
+            "es": "El directorio de estado {path} existe pero no es un directorio; configure state_dir con un "
+            "directorio",
+        },
+        "state.error.legacy_file": {
+            "en": "{path} is a state database created by an older hushwatch instead of the state directory; the next "
+            "'hushwatch check' moves it to {path}/state.sqlite3",
+            "es": "{path} es una base de datos de estado creada por una versión anterior de hushwatch en lugar del "
+            "directorio de estado; la próxima ejecución de 'hushwatch check' la mueve a {path}/state.sqlite3",
+        },
+        "state.migrated": {
+            "en": "Moved the state database found at {path} (created there by an older hushwatch) into the state "
+            "directory",
+            "es": "Se movió la base de datos de estado encontrada en {path} (creada allí por una versión anterior de "
+            "hushwatch) al directorio de estado",
         },
     }
 )
@@ -391,7 +408,7 @@ def load_accept_file(
     missing_ok: bool = True,
     max_days: int = ACCEPT_MAX_DAYS,
 ) -> AcceptList:
-    """Load and validate ``hushwatch-accept.yml`` (``yaml.safe_load`` only).
+    """Load and validate ``hushwatch-accept.yml`` (safe YAML loader: no Python tags, no aliases).
 
     Format (a bare list of entries is also accepted)::
 
@@ -473,13 +490,10 @@ def parse_accept(
     shown = Entity("file", str(source) if source is not None else "<accept>")
     header = M("state.accept.invalid", path=shown)
     try:
-        raw = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise AcceptFileError(header, [M("state.accept.yaml", error=_short(str(exc), 300))]) from None
-    except (ValueError, TypeError, OverflowError, RecursionError) as exc:  # e.g. an impossible date 2026-13-40
-        raise AcceptFileError(
-            header, [M("state.accept.yaml", error=_short(type(exc).__name__ + ": " + str(exc), 300))]
-        ) from None
+        # no aliases (exponential "billion laughs" expansion); errors give the position, never the text
+        raw = safe_yaml_load(text, source="accept file")
+    except YamlError as exc:
+        raise AcceptFileError(header, [M("state.accept.yaml", error=_short(exc.detail, 300))]) from None
     problems: list[Message] = []
     items: list[Any]
     if raw is None:
@@ -952,7 +966,9 @@ class _Rec:
 class StateStore:
     """Per-state-directory SQLite store of finding lifecycles, runs and heartbeats.
 
-    ``path`` is the database file; an existing directory means ``<dir>/state.sqlite3``. Missing parent
+    ``path`` is the database file; an existing directory means ``<dir>/state.sqlite3``, and so does a path WITHOUT a
+    file extension that does not exist yet (it is taken for a state directory: a database file is never created
+    under a directory's name). Missing parent
     directories are created with mode 0700 and the database file with mode 0600 (an existing file readable by
     others is tightened). A directory other users can write to (or owned by another user) and symlinks in
     place of the database or its ``-wal``/``-shm``/``-journal`` files are refused with :class:`StateError`.
@@ -962,7 +978,7 @@ class StateStore:
 
     def __init__(self, path: str | Path, *, busy_timeout: float = 30.0) -> None:
         db_path = Path(path).expanduser()
-        if db_path.is_dir():
+        if db_path.is_dir() or (not db_path.suffix and not os.path.lexists(db_path)):
             db_path = db_path / STATE_FILENAME
         self.path = db_path
         self._lock = threading.RLock()
@@ -1025,6 +1041,7 @@ class StateStore:
         accept: AcceptList | None = None,
         remind_every: timedelta = timedelta(hours=12),
         assessed: Collection[str] | None = None,
+        unassessed_kinds: Collection[str] = (),
         flap_threshold: int = 3,
         flap_window: timedelta = timedelta(hours=24),
         retention: timedelta = timedelta(days=90),
@@ -1042,13 +1059,19 @@ class StateStore:
           resolution when its domain was assessed: an analysis that did not run proves nothing (never a false
           green). Default: every domain, except that when the run itself reported ``assessment.incomplete``
           only the ``assessment`` domain may recover. Pass the report's assessed domains to be precise.
+        * ``unassessed_kinds`` — finding kinds this run could not re-check although their domain ran (e.g. the
+          agent-connectivity kinds when the Wazuh API was unreachable): absent findings of these kinds are left as
+          they are, exactly like findings of a domain that was not assessed.
+        * Findings listed in the ``related`` of a finding reported by this run are *explained* by it (e.g. a host's
+          silent channel explained by the host's own silence): they are still there, just grouped, so they never
+          count toward resolution while their explaining finding is present (``counts["explained"]``).
         * ``accept`` — accepted findings are tracked but not notified (counted in ``counts["suppressed"]``);
           an expired entry produces one ``acceptance_expired`` transition.
 
         Returns the transitions (``opened``, ``regressed``, ``escalated``, ``resolved``, ``reminder``,
         ``flapping``, ``acceptance_expired``) and counts: ``findings`` (reported this run), ``open``
         (+ ``open.<severity>``), ``pending`` (waiting for hysteresis), ``accepted``, ``flapping``, ``suppressed``,
-        ``not_assessed``, ``ignored``.
+        ``not_assessed``, ``explained``, ``ignored``.
         """
         now_utc = _aware(now)
         if open_after < 1 or resolve_after < 1 or flap_threshold < 2:
@@ -1078,6 +1101,8 @@ class StateStore:
             assessed_set: frozenset[str] | None = frozenset({"assessment"}) if incomplete else None
         else:
             assessed_set = frozenset(assessed)
+        skip_kinds = frozenset(unassessed_kinds)
+        explained = {fp for f in present.values() for fp in f.related if fp not in present}
 
         with self._lock, self._transaction() as conn:
             row = conn.execute(
@@ -1138,16 +1163,19 @@ class StateStore:
             # 2. findings absent from this run ---------------------------------------------------------------
             valid_ids = {e.id for e in accept.active(now_utc, tenant=tenant)} if accept is not None else set()
             lapsed: dict[str, str] = {}  # absent fingerprint -> id of the acceptance that no longer covers it
-            not_assessed = 0
+            not_assessed = explained_count = 0
             for fp, rec in records.items():
                 if fp in present:
                     continue
                 if rec.accepted_entry is not None and rec.accepted_entry not in valid_ids:
                     lapsed[fp] = rec.accepted_entry
                     rec.accepted_entry = rec.accepted_until = None
-                if assessed_set is not None and rec.domain not in assessed_set:
-                    if rec.status in ACTIVE_STATUSES or (rec.status == NEW and rec.consecutive_bad > 0):
-                        not_assessed += 1  # open or pending findings this run could not re-check
+                tracked = rec.status in ACTIVE_STATUSES or (rec.status == NEW and rec.consecutive_bad > 0)
+                if fp in explained:  # grouped under a finding of this run: still present, never "resolved"
+                    explained_count += int(tracked)
+                    continue
+                if (assessed_set is not None and rec.domain not in assessed_set) or rec.kind in skip_kinds:
+                    not_assessed += int(tracked)  # open or pending findings this run could not re-check
                     continue
                 rec.consecutive_bad = 0
                 rec.consecutive_good += 1
@@ -1310,6 +1338,7 @@ class StateStore:
             conn.execute("DELETE FROM heartbeats WHERE tenant = ? AND at < ?", (tenant, cutoff))
 
             counts = _counts(records, present, accepted_now, suppressed, not_assessed, ignored)
+            counts["explained"] = explained_count
             conn.execute(
                 "INSERT INTO runs (run_id, tenant, run_at, recorded_at, counts) VALUES (?, ?, ?, ?, ?)",
                 (run_id, tenant, now_s, int(time.time()), json.dumps(counts, sort_keys=True)),
@@ -1793,6 +1822,95 @@ def _url_origin(match: re.Match[str]) -> str:
     return origin + "/…" if len(match.group(0)) > len(origin) + len(match.group(2) or "") else origin
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def prepare_state_dir(state_dir: str | Path) -> Path:
+    """Make ``state_dir`` a private directory (created 0700 with its missing parents) and return it.
+
+    Versions before 0.1.1 of ``hushwatch check`` created the SQLite database AT the state directory path when the
+    directory did not exist yet (and then failed on every run). Such a database file (with its ``-wal``/``-shm``/
+    ``-journal`` companions) is moved to ``<state_dir>/state.sqlite3`` so its history is kept. Anything else that
+    is not a directory, a symlink to a file, or a directory other users can write to raises :class:`StateError`.
+    """
+    directory = Path(state_dir).expanduser()
+    shown = Entity("file", str(directory))
+    try:
+        try:
+            st = os.stat(directory)
+        except FileNotFoundError:
+            if os.path.islink(directory):  # dangling symlink
+                raise StateError(M("state.error.not_dir", path=shown)) from None
+            st = None
+        if st is not None and not stat.S_ISDIR(st.st_mode):
+            if not stat.S_ISREG(st.st_mode) or os.path.islink(directory) or not _is_sqlite(directory):
+                raise StateError(M("state.error.not_dir", path=shown))
+            _move_database_into_dir(directory)
+            log.warning("%s", render(M("state.migrated", path=shown), "en"))
+        _ensure_private_dir(directory)
+    except OSError as exc:
+        raise StateError(M("state.error.open", path=shown, error=exc.strerror or type(exc).__name__)) from None
+    _check_private_dir(directory)
+    return directory
+
+
+def state_dir_problem(state_dir: str | Path) -> tuple[str, Message] | None:
+    """Why ``state_dir`` cannot be used as it is, without changing anything (for ``hushwatch doctor``).
+
+    Returns ``("warn", message)`` for a database left at the directory path by an older version (it is migrated
+    by the next run), ``("fail", message)`` for an unusable path, or None when it is (or can become) a directory."""
+    directory = Path(state_dir).expanduser()
+    shown = Entity("file", str(directory))
+    try:
+        st = os.stat(directory)
+    except FileNotFoundError:
+        return ("fail", M("state.error.not_dir", path=shown)) if os.path.islink(directory) else None
+    except OSError as exc:
+        return "fail", M("state.error.open", path=shown, error=exc.strerror or type(exc).__name__)
+    if not stat.S_ISDIR(st.st_mode):
+        if stat.S_ISREG(st.st_mode) and not os.path.islink(directory) and _is_sqlite(directory):
+            return "warn", M("state.error.legacy_file", path=shown)
+        return "fail", M("state.error.not_dir", path=shown)
+    try:
+        _check_private_dir(directory)
+    except StateError as exc:
+        return "fail", exc.message
+    except OSError as exc:
+        return "fail", M("state.error.open", path=shown, error=exc.strerror or type(exc).__name__)
+    return None
+
+
+def _is_sqlite(path: Path) -> bool:
+    """True for an empty file or one that starts with the SQLite header (read without following links)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False
+    try:
+        head = os.read(fd, len(_SQLITE_MAGIC))
+    finally:
+        os.close(fd)
+    return head == b"" or head == _SQLITE_MAGIC
+
+
+def _move_database_into_dir(path: Path) -> None:
+    """``path`` (a database file) becomes ``path/state.sqlite3``; companions follow. Renames only (same parent)."""
+    parked = path.with_name(f".{path.name}.migrating-{secrets.token_hex(4)}")
+    suffixes = ("-wal", "-shm", "-journal")
+    sides = [s for s in suffixes if os.path.lexists(str(path) + s)]
+    for suffix in sides:
+        _check_not_link(Path(str(path) + suffix))
+    os.rename(path, parked)
+    for suffix in sides:
+        os.rename(str(path) + suffix, str(parked) + suffix)
+    os.mkdir(path, 0o700)
+    os.chmod(path, 0o700)
+    target = path / STATE_FILENAME
+    os.rename(parked, target)
+    for suffix in sides:
+        os.rename(str(parked) + suffix, str(target) + suffix)
+
+
 def _ensure_private_dir(directory: Path) -> None:
     """Create missing directories with mode 0700 (existing directories are left untouched)."""
     missing: list[Path] = []
@@ -1897,6 +2015,8 @@ __all__ = [
     "Transition",
     "load_accept_file",
     "parse_accept",
+    "prepare_state_dir",
+    "state_dir_problem",
 ]
 
 

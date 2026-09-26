@@ -114,7 +114,8 @@ NET_CONN = Rule(
     "EventChannel",
 )
 
-TENANT = TenantConfig(trusted_entities={"user": ["svc_backup"], "data.srcip": ["10.20.0.15"]})
+# triage_level 4: the level-5 rules below (sshd, web 400) are analyst-facing, so demoting them is worth something
+TENANT = TenantConfig(trusted_entities={"user": ["svc_backup"], "data.srcip": ["10.20.0.15"]}, triage_level=4)
 _SEQ = itertools.count(1)
 
 
@@ -176,12 +177,17 @@ def every(start: datetime, end: datetime, step: timedelta, *, jitter: int = 0, s
         t += step
 
 
+def no_dependents(rule_id: str) -> tuple[str, ...]:
+    """A loaded (stock + local) ruleset in which nothing correlates on the rule."""
+    return ()
+
+
 def run(
     events: list[Event],
     *,
     tenant: TenantConfig = TENANT,
     dispositions: Dispositions | None = None,
-    dependents: Callable[[str], tuple[str, ...]] | None = None,
+    dependents: Callable[[str], tuple[str, ...]] | None = no_dependents,
     now: datetime = END,
     profile: str = "wazuh4",
 ) -> NoiseResult:
@@ -205,8 +211,19 @@ def tune(result: NoiseResult) -> list[Suggestion]:
     return [s for s in result.suggestions if s.verdict == "tune"]
 
 
+def passed(result: NoiseResult) -> list[Suggestion]:
+    """Every candidate that passed the gates AND the backtest: tune, plus index-volume-only ones (nothing to gain
+    for analysts, never written as rules, but their scope must be just as safe)."""
+    return [s for s in result.suggestions if s.verdict == "tune" or s.index_volume]
+
+
 def finding_for(result: NoiseResult, suggestion: Suggestion) -> Finding:
-    matches = [f for f in result.findings if f.evidence.get("suggestion") == suggestion.fingerprint]
+    matches = [
+        f
+        for f in result.findings
+        if f.evidence.get("suggestion") == suggestion.fingerprint
+        or suggestion.fingerprint in (f.evidence.get("suggestions") or ())
+    ]
     assert len(matches) == 1, [f.kind for f in result.findings]
     return matches[0]
 
@@ -316,6 +333,10 @@ def test_1_service_account_automation_is_tuned() -> None:
     finding = finding_for(result, suggestion)
     assert finding.kind == "noise.tune" and finding.severity.value == "medium" and finding.domain == "noise"
     assert finding.subject.startswith("rule:100200|")
+    # one id for the suggestion: the finding's fingerprint is the one written into the rule and the spec
+    assert finding.fingerprint == suggestion.fingerprint
+    assert suggestion.impact == "analyst" and not suggestion.review_required
+    assert isinstance(finding.title, Message) and finding.title.key == "noise.title.tune"
     assert finding.evidence["backtest"]["hidden"] == len(automation)
     assert finding.evidence["time_saved_minutes_per_day"][0] > 0
     assert_entities_wrapped(finding, ["srv-backup-01.corp.example", "svc_backup"])
@@ -334,12 +355,24 @@ def test_1b_sensitive_rule_needs_fp_evidence() -> None:
     ids = [e.event_id for e in events if e.fields["agent.name"] == "srv-backup-01.corp.example"][:30]
     disp = Dispositions.from_rows([{"alert_id": i, "verdict": "btp"} for i in ids if i])
     with_evidence = run(events, dispositions=disp)
-    tuned = tune(with_evidence)
-    assert len(tuned) == 1 and any(c.value == "svc_backup" for c in tuned[0].conditions)
-    finding = finding_for(with_evidence, tuned[0])
-    assert finding.confidence.value == "high"
-    assert finding.severity.value == "low"  # level 3 is below the triage level: index noise only
+    # level 3 is already the demote level: it passes every gate and the backtest, but a demote rule would change
+    # nothing, so it is never "tune": it is reported as index volume only
+    assert tune(with_evidence) == []
+    volume = [s for s in with_evidence.suggestions if s.index_volume]
+    assert len(volume) == 1 and any(c.value == "svc_backup" for c in volume[0].conditions)
+    assert volume[0].verdict == "watch"
+    finding = finding_for(with_evidence, volume[0])
+    assert finding.kind == "noise.index_volume" and finding.severity.value == "low"
     assert finding.evidence["dispositions"]["fp_lower_bound"] >= 0.8
+    assert with_evidence.section["safe_tuning_candidates"] == 0
+    assert with_evidence.section["index_volume_candidates"] == 1
+    # the same automation on an analyst-facing logon rule is a real tuning candidate
+    analyst_rule = Rule(**{**WIN_LOGON.__dict__, "id": "100106", "level": 8})
+    events = service_automation(analyst_rule) + human_background(analyst_rule)
+    ids = [e.event_id for e in events if e.fields["agent.name"] == "srv-backup-01.corp.example"][:30]
+    disp = Dispositions.from_rows([{"alert_id": i, "verdict": "btp"} for i in ids if i])
+    tuned = tune(run(events, dispositions=disp))
+    assert len(tuned) == 1 and any(c.value == "svc_backup" for c in tuned[0].conditions)
 
 
 # ---- (2) brute force from a NEW public IP inside a noisy 5710 ----------------------------------------------------
@@ -385,9 +418,9 @@ def test_2_new_brute_force_is_never_tuned_and_never_hidden() -> None:
     scanner_suggestions = [s for s in tune(result) if any(c.value == "10.20.0.15" for c in s.conditions)]
     assert scanner_suggestions
     assert_never_hidden(result, attack + correlated)
-    # the correlation rule itself (level 10) is never tunable
-    brute = [f for f in result.findings if f.subject == "rule:5712"]
-    assert brute and brute[0].kind == "noise.do_not_tune"
+    # the correlation rule itself (level 10) is never tunable; with 90 alerts in 21 days it is not "noisy" either
+    assert not any(s.rule_id == "5712" for s in result.suggestions)
+    assert not [f for f in result.findings if f.subject == "rule:5712"]
 
 
 # ---- (3) password spray: many users, one public IP ---------------------------------------------------------------
@@ -509,7 +542,11 @@ def test_6_fim_log_path_noise_is_fixed_at_source() -> None:
     suggestions = with_value(result, "/var/log/app/app.log")
     assert suggestions and all(s.verdict == "fix_at_source" for s in suggestions)
     finding = finding_for(result, suggestions[0])
-    assert finding.kind == "noise.fix_at_source" and finding.title.key == "noise.title.fix_at_source.fim"
+    assert finding.kind == "noise.fix_at_source" and finding.title.key == "noise.title.fix_at_source.fim_paths"
+    assert finding.subject == "rule:550|fim"
+    assert [p["path"] for p in finding.evidence["paths"]] == [Entity("file", "/var/log/app/app.log")]
+    assert isinstance(finding.recommendation, Message)
+    assert finding.recommendation.key == "noise.rec.fix_at_source.fim_paths"  # one path: an exact <ignore>
     assert tune(result) == []
 
 
@@ -537,7 +574,9 @@ def test_8_true_positive_disposition_blocks_tuning() -> None:
     blocked = with_value(result, "svc_backup")
     assert blocked and all(s.verdict == "do_not_tune" for s in blocked)
     finding = finding_for(result, blocked[0])
-    assert finding.kind == "noise.do_not_tune" and finding.severity.value == "low"
+    # confirmed true positives are attack activity, not noise: HIGH (cron mode notifies it), never "fix the noise"
+    assert finding.kind == "noise.do_not_tune" and finding.severity.value == "high"
+    assert isinstance(finding.recommendation, Message) and "incident" in i18n.render(finding.recommendation)
     scoped = Dispositions.from_rows(
         [{"rule_id": "100200", "field": "data.win.eventdata.subjectUserName", "value": "svc_backup", "verdict": "tp"}]
     )
@@ -984,6 +1023,7 @@ def test_generic_profile_uses_the_input_mapping() -> None:
         )
         for t in every(START, END, timedelta(minutes=30), seed=26)
     ]
+    tenant.triage_level = 5  # severity 6: analyst-facing
     result = run(events, tenant=tenant, profile="generic")
     tuned = tune(result)
     assert tuned and {c.field for c in tuned[0].conditions} <= {"hostname", "account"}
@@ -1214,9 +1254,13 @@ def test_15_syslog_sender_scope_gets_host_safeguards() -> None:
     render_everything(result)
     assert tune(result) == []
     device = [s for s in result.suggestions if any(c.field == "location" for c in s.conditions)]
-    assert device and all(s.verdict == "fix_at_source" for s in device)
+    # a firewall that DROPS Internet traffic: aggregate (one alert per source), never "block the firewall"
+    assert device and all(s.verdict == "aggregate" for s in device)
     finding = finding_for(result, device[0])
-    assert isinstance(finding.title, Message) and finding.title.key == "noise.title.fix_at_source.exposure"
+    assert isinstance(finding.title, Message) and finding.title.key == "noise.title.aggregate.firewall"
+    assert all(e.kind == "ip" and e.value.startswith("203.0.113.") for e in finding.title.params["sources"])
+    assert isinstance(finding.recommendation, Message)
+    assert finding.recommendation.key == "noise.rec.aggregate.firewall"
     # the manager's own name is never a scope: it would mute every device that sends it syslog
     assert not any(c.field == "agent.name" for s in result.suggestions for c in s.conditions)
 
@@ -1298,8 +1342,9 @@ def test_16_machine_accounts_never_anchor_and_are_never_trusted_by_pattern() -> 
     for suggestion in result.suggestions:
         fields = [c.field for c in suggestion.conditions]
         assert fields not in (["data.win.eventdata.subjectUserName"], ["data.win.eventdata.targetUserName"]), fields
-    tuned = tune(result)
+    tuned = passed(result)  # level-3 logons: index volume only, but the scope must be just as tight
     assert len(tuned) == 1
+    assert not any(s.matches(e) for s in tuned for e in rdp + admins)
     assert {(c.field, c.value) for c in tuned[0].conditions} == {
         ("agent.name", "srv-backup-01.corp.example"),
         ("data.win.eventdata.targetUserName", "svc_backup"),
@@ -1323,9 +1368,10 @@ def test_17_account_scopes_are_bound_to_hosts() -> None:
     render_everything(unvouched)
     assert tune(unvouched) == []
     keys = {r.key for s in unvouched.suggestions for r in s.reasons if isinstance(r, Message)}
-    assert "noise.reason.attacker_field" in keys
+    assert "noise.reason.named_account" in keys  # trusted by its name only: never also called "trusted"
     # once the tenant vouches for it, the per-host automation is tunable, host by host
-    result = run(usage + lateral, tenant=TenantConfig(trusted_entities={"user": ["svc_monitor"]}))
+    tenant = TenantConfig(trusted_entities={"user": ["svc_monitor"]}, triage_level=5)
+    result = run(usage + lateral, tenant=tenant)
     render_everything(result)
     assert_never_hidden(result, lateral)
     assert tune(result), "the per-host automation is still a tuning candidate"
@@ -1495,7 +1541,7 @@ def test_demo_dataset_no_tune_hides_a_planted_attack(tmp_path: Any) -> None:
     ruleset = load_ruleset([str(manifest.rules_dir)])
     result = analyze_noise(collector, tenant=tenant, now=manifest.now, dependents=ruleset.dependents)
     result = apply_backtest(result, source, tenant=tenant)
-    tuned = tune(result)
+    tuned = passed(result)  # tune AND index-volume candidates: neither may ever cover a planted attack
     assert tuned
     planted = [sc for sc in manifest.ground_truth if sc.must_not_hide]
     checked = 0
@@ -1533,7 +1579,8 @@ def test_26_syslog_sender_is_combined_with_a_stable_second_anchor() -> None:
         )
         for t in every(START, END, timedelta(minutes=10), seed=43)
     ]
-    result = run(monitor + others, tenant=TenantConfig(trusted_entities={"data.srcip": ["10.20.0.15"]}))
+    tenant = TenantConfig(trusted_entities={"data.srcip": ["10.20.0.15"]}, triage_level=5)
+    result = run(monitor + others, tenant=tenant)
     render_everything(result)
     tuned = tune(result)
     assert [{(c.field, c.value) for c in s.conditions} for s in tuned] == [

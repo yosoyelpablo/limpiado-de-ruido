@@ -382,7 +382,7 @@ def test_scale_changes_background_but_never_the_planted_scenarios(tmp_path: Path
     assert high.alerts > low.alerts
     for background_rule in ("5501", "67027"):  # cron sessions, process creation: pure background
         assert high.rule_counts[background_rule] > 2.4 * low.rule_counts[background_rule]
-    for sid in ("a", "b", "c", "d", "e", "f", "g", "i"):
+    for sid in ("a", "b", "u", "c", "d", "e", "f", "g", "i"):
         assert low.scenario(sid).count == high.scenario(sid).count, sid
         assert low.scenario(sid).start == high.scenario(sid).start, sid
 
@@ -486,7 +486,7 @@ def test_manifest_exposes_paths_and_ground_truth(full: Dataset) -> None:
     assert manifest.manifest_path.is_file()
     ids = [s.id for s in manifest.ground_truth]
     assert len(ids) == len(set(ids))
-    expected_ids = set("abcdefghijklmnoqrs") | {"p1", "p2", "p3", "t1", "t2", "t3", "t4", "t5"}
+    expected_ids = set("abcdefghijklmnoqrsu") | {"p1", "p2", "p3", "t1", "t2", "t3", "t4", "t5"}
     assert set(ids) == expected_ids
     assert manifest.scenarios is manifest.ground_truth
     assert manifest.scenario("trap.ssh_brute_force").id == "d"
@@ -512,7 +512,8 @@ def test_manifest_counts_match_the_alerts(full: Dataset) -> None:
     assert dict(by_rule) == full.manifest.rule_counts
     checks = {
         "a": lambda a: a.agent == "srv-backup-01" and a.target_user == "svc_backup",
-        "b": lambda a: a.srcip == demo.SCANNER_IP,
+        "b": lambda a: a.srcip == demo.SCANNER_IP and a.rule == "5710",
+        "u": lambda a: a.srcip == demo.SCANNER_IP and a.rule == "31115",
         "d": lambda a: a.srcip == demo.BRUTE_FORCE_IP,
         "e": lambda a: a.ip_address == demo.SPRAY_IP,
         "f": lambda a: a.dest_ip == demo.BEACON_IP,
@@ -578,12 +579,16 @@ def test_a_svc_backup_nightly_logons(full: Dataset) -> None:
     assert len(nights) >= full.manifest.days - 1  # every night of the window
     share = len(planted) / full.manifest.rule_counts["60106"]
     assert share >= 0.25
-    assert full.manifest.scenario("a").review_required is False
+    scenario = full.manifest.scenario("a")
+    assert scenario.review_required is False
+    # level 3: below the triage level and already at the demote level, so tuning it saves no analyst time
+    assert all(a.level == 3 for a in planted)
+    assert scenario.expected_verdict == "watch" and scenario.expected_kinds == ("noise.index_volume",)
 
 
 def test_b_internal_scanner_every_night_on_every_web_server(full: Dataset) -> None:
-    planted = [a for a in full.alerts if a.srcip == demo.SCANNER_IP]
-    assert {a.rule for a in planted} == {"5710"}
+    assert {a.rule for a in full.alerts if a.srcip == demo.SCANNER_IP} == {"5710", "31115"}  # ssh (b), URLs (u)
+    planted = [a for a in full.alerts if a.srcip == demo.SCANNER_IP and a.rule == "5710"]
     assert {a.agent for a in planted} == {f"srv-web-{i:02d}" for i in range(1, 7)}
     assert len({_local(a.ms).date() for a in planted}) >= full.manifest.days - 1
     per_agent: dict[str, list[int]] = defaultdict(list)
@@ -595,6 +600,25 @@ def test_b_internal_scanner_every_night_on_every_web_server(full: Dataset) -> No
     assert len(planted) / full.manifest.rule_counts["5710"] >= 0.25
     scenario = full.manifest.scenario("b")
     assert scenario.review_required is True and "5712" in scenario.details["dependents"]
+    # analyst-facing: 5710 (level 5) is at the demo tenant's triage level
+    level = next(a.level for a in planted)
+    assert level >= load_config(full.manifest.config_path).tenant().triage_level
+
+
+def test_u_scanner_long_urls_are_a_clean_analyst_facing_candidate(full: Dataset) -> None:
+    planted = [a for a in full.alerts if a.rule == "31115"]
+    assert planted and all(a.srcip == demo.SCANNER_IP for a in planted)  # the whole rule is the authorized scan
+    assert {a.agent for a in planted} == {f"srv-web-{i:02d}" for i in range(1, 7)}
+    assert len({_local(a.ms).date() for a in planted}) >= full.manifest.days - 1  # every night
+    assert all(a.level == 7 for a in planted)
+    tenant = load_config(full.manifest.config_path).tenant()
+    assert tenant.triage_level <= 7 < tenant.high_level and tenant.max_tunable_level >= 7
+    doc = full.docs_by_rule["31115"]
+    assert doc["data"]["id"] == "414" and len(doc["data"]["url"]) > 2083
+    scenario = full.manifest.scenario("u")
+    assert scenario.expected_verdict == "tune" and scenario.review_required is False
+    assert scenario.details["dependents"] == [] and scenario.details["share_of_rule"] == 1.0
+    assert not scenario.must_not_hide
 
 
 def test_c_fim_noise_on_application_logs(full: Dataset) -> None:
@@ -685,7 +709,10 @@ def test_background_never_reuses_planted_addresses(full: Dataset) -> None:
         (demo.SCANNER_IP, "b"),
     ):
         uses = [a for a in full.alerts if ip in (a.srcip, a.ip_address, a.dest_ip)]
-        assert len(uses) == full.manifest.scenario(sid).count, ip
+        planted = full.manifest.scenario(sid).count
+        if sid == "b":  # the scanner also plants scenario u (over-long URLs)
+            planted += full.manifest.scenario("u").count
+        assert len(uses) == planted, ip
 
 
 # ---- planted silence / coverage / pipeline scenarios ---------------------------------------------------------------
@@ -699,7 +726,7 @@ def test_i_dc02_silent_after_audit_log_cleared(full: Dataset) -> None:
     assert len(cleared) == 1 and cleared[0].rule == "63103" and cleared[0].level == 12
     assert 19 * 60_000 <= silence_start - cleared[0].ms <= 21 * 60_000
     assert dc02[-1].ms - cleared[0].ms < 21 * 60_000  # dc02 still sent events after the clear, then nothing
-    assert full.manifest.scenario("i").details["also_expected"] == ["pipeline.agent_no_data"]
+    assert full.manifest.scenario("i").details["explains"] == ["pipeline.agent_no_data", "silence.unmonitorable"]
 
 
 def test_j_sysmon_channel_stops_while_security_continues(full: Dataset) -> None:
@@ -901,6 +928,8 @@ def test_dispositions_reference_real_alerts(full: Dataset) -> None:
             key = (
                 "a"
                 if alert.target_user == "svc_backup"
+                else "u"
+                if alert.srcip == demo.SCANNER_IP and alert.rule == "31115"
                 else "b"
                 if alert.srcip == demo.SCANNER_IP
                 else "e"
@@ -916,7 +945,7 @@ def test_dispositions_reference_real_alerts(full: Dataset) -> None:
                 "tp",
             )
     assert "other" not in verdicts
-    for key in ("a", "b"):
+    for key in ("a", "b", "u"):
         assert verdicts[key]["fp"] + verdicts[key]["btp"] >= 10  # enough for a Wilson lower bound
         assert verdicts[key]["tp"] == 0
     assert verdicts["e"]["tp"] == 1
@@ -927,7 +956,9 @@ def test_config_parses_and_describes_the_demo_tenant(full: Dataset) -> None:
     tenant = load_config(full.manifest.config_path).tenant()
     assert tenant.name == demo.TENANT_NAME
     assert tenant.timezone == "America/Argentina/Buenos_Aires"
-    assert tenant.triage_level == 7
+    assert tenant.triage_level == 5  # level-5 rules (sshd, web 4xx, firewall drops) reach the analysts
+    if os.name == "posix":  # configurations can hold credentials: written owner-only (doctor checks it)
+        assert full.manifest.config_path.stat().st_mode & 0o777 == 0o600
     assert tenant.tier_for("dc01") == "critical" and tenant.tier_for("fw-edge-01") == "critical"
     assert tenant.tier_for("lap-003") == "low" and tenant.tier_for("srv-web-01") == "standard"
     assert tenant.is_trusted("user", "svc_backup") and tenant.is_trusted("data.srcip", demo.SCANNER_IP)
@@ -935,8 +966,12 @@ def test_config_parses_and_describes_the_demo_tenant(full: Dataset) -> None:
     holiday = full.manifest.holiday
     assert holiday is not None and tenant.in_calendar(holiday)
     assert full.manifest.start.date() < holiday < full.manifest.now.date()
-    assert [i.path for i in tenant.inputs] == ["alerts.json"] and tenant.inputs[0].type == "file"
-    assert tenant.ruleset_dirs == ["rules"] and tenant.dispositions == "dispositions.csv"
+    # relative paths in the file, resolved against the configuration's own directory
+    base = full.manifest.config_path.parent
+    assert "path: alerts.json" in full.manifest.config_path.read_text(encoding="utf-8")
+    assert [base / i.path for i in tenant.inputs] == [full.manifest.alerts_path] and tenant.inputs[0].type == "file"
+    assert [base / d for d in tenant.ruleset_dirs] == [full.manifest.rules_dir]
+    assert tenant.dispositions is not None and base / tenant.dispositions == full.manifest.dispositions_path
     names = {e.name: e for e in tenant.expectations}
     assert names["windows servers"].match == {"platform": "windows", "name": "srv-*"}
     assert set(names["windows servers"].log_sources) == {"Security", SYSMON}

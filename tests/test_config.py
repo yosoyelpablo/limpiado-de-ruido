@@ -59,23 +59,28 @@ def test_secrets_never_in_repr() -> None:
 
 
 def test_missing_env_var_names_the_variable_not_a_value() -> None:
-    with pytest.raises(ConfigError, match="ACME_WAZUH_API_PASSWORD"):
-        load_config(
-            ROOT / "examples" / "hushwatch.yml", environ={k: v for k, v in ENV.items() if "API_PASSWORD" not in k}
-        )
+    cfg = load_config(
+        ROOT / "examples" / "hushwatch.yml", environ={k: v for k, v in ENV.items() if "API_PASSWORD" not in k}
+    )
+    with pytest.raises(ConfigError, match="ACME_WAZUH_API_PASSWORD") as caught:
+        cfg.tenant("acme")
+    assert "S3cret" not in str(caught.value)
+    assert cfg.tenant("globex").inputs[0].password == ENV["GLOBEX_INDEXER_PASSWORD"]  # other tenants still work
 
 
 @pytest.mark.parametrize(
     ("tenant", "message"),
     [
-        ({"triage_levl": 3}, "unknown keys triage_levl"),
+        ({"triage_levl": 3}, "unknown key 'triage_levl' \\(did you mean 'triage_level'\\?\\)"),
         ({"timezone": "Mars/Olympus"}, "unknown timezone"),
         ({"internal_networks": ["10.0.0.0/33"]}, "invalid network"),
         ({"suppression_id_range": [1, 5]}, "100000-120000"),
         ({"inputs": [{"type": "file"}]}, "needs 'path'"),
         ({"inputs": [{"type": "kafka", "path": "x"}]}, "file or indexer"),
         ({"inputs": [{"type": "file", "path": "x", "max_events": "lots"}]}, "expected a number"),
-        ({"wazuh_api": {"url": "https://m", "bogus": 1}}, "unknown keys bogus"),
+        ({"wazuh_api": {"url": "https://m", "bogus": 1}}, "tenants.t.wazuh_api: unknown key 'bogus'"),
+        ({"criticality": {"crtical": ["dc*"]}}, "unknown tier 'crtical' \\(did you mean 'critical'\\?\\)"),
+        ({"wazuh_api": {"username": "u"}}, "missing required key\\(s\\) url"),
         ({"state_dir": ["x"]}, "expected a string"),
         ({"sla": {"platinum": "1h"}}, "unknown sla tier"),
         ({"notify": [{"type": "slack", "url": "https://x", "min_severity": "loud"}]}, "min_severity"),

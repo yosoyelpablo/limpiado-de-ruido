@@ -56,6 +56,7 @@ from ..net import (
     make_client,
     retry_after,
     safe_url,
+    sanitize_message,
     sanitize_text,
     send_bounded,
     transport_error,
@@ -87,7 +88,7 @@ register(
         "indexer.err.index": {
             "en": "Invalid index pattern {index}: use index names, '*' wildcards, '-' exclusions and commas "
             "only (no spaces, '/', '?', '#', and no name starting with '_').",
-            "es": "Patrón de índice no válido {index}: usa solo nombres de índice, comodines '*', exclusiones "
+            "es": "Patrón de índice no válido {index}: use solo nombres de índice, comodines '*', exclusiones "
             "'-' y comas (sin espacios, '/', '?', '#' ni nombres que empiecen por '_').",
         },
         "indexer.err.api_key": {
@@ -98,7 +99,7 @@ register(
             "en": "The indexer at {url} rejected the credentials (HTTP {status}) during '{op}' ({reason}). Check "
             "username/password or api_key for this input.",
             "es": "El indexer de {url} rechazó las credenciales (HTTP {status}) durante '{op}' ({reason}). "
-            "Revisa username/password o api_key de esta entrada.",
+            "Revise username/password o api_key de esta entrada.",
         },
         "indexer.err.forbidden": {
             "en": "The indexer user may not run '{op}' on {index} (HTTP 403: {reason}). Grant the 'read' and "
@@ -109,14 +110,14 @@ register(
         "indexer.err.not_found": {
             "en": "'{op}' on {index} returned HTTP 404 ({reason}). Check the index pattern; wazuh-archives-* "
             "only exists when archives are enabled.",
-            "es": "'{op}' sobre {index} devolvió HTTP 404 ({reason}). Revisa el patrón de índice; "
+            "es": "'{op}' sobre {index} devolvió HTTP 404 ({reason}). Revise el patrón de índice; "
             "wazuh-archives-* solo existe si los archives están activados.",
         },
         "indexer.err.rate_limited": {
             "en": "The indexer rejected '{op}' on {index} as overloaded (HTTP {status}) after {attempts} "
             "attempts. Run hushwatch off-peak or lower the page size.",
             "es": "El indexer rechazó '{op}' sobre {index} por sobrecarga (HTTP {status}) tras {attempts} "
-            "intentos. Ejecuta hushwatch fuera de horas punta o reduce el tamaño de página.",
+            "intentos. Ejecute hushwatch fuera de las horas pico o reduzca el tamaño de página.",
         },
         "indexer.err.http": {
             "en": "The indexer returned HTTP {status} for '{op}' on {index} ({reason}).",
@@ -138,7 +139,7 @@ register(
             "en": "The search context on {url} expired or was lost during '{op}' (HTTP 404: {reason}); the "
             "document stream is incomplete. Re-run; pages must be consumed within {keep_alive}.",
             "es": "El contexto de búsqueda en {url} caducó o se perdió durante '{op}' (HTTP 404: {reason}); la "
-            "descarga de documentos está incompleta. Vuelve a ejecutar; cada página debe consumirse en menos de "
+            "descarga de documentos está incompleta. Vuelva a ejecutarlo; cada página debe consumirse en menos de "
             "{keep_alive}.",
         },
         "indexer.partial.shards": {
@@ -543,8 +544,9 @@ class IndexerClient:
 
     # ---- lifecycle -------------------------------------------------------------------------------------------
     def apply_to(self, basis: DataBasis) -> None:
-        """Fold partial failures, warnings, truncation and malformed hits into ``basis`` (idempotent)."""
-        _merge(basis.partial_failures, self.partial_failures)
+        """Fold partial failures (as translatable messages), warnings, truncation and malformed hits into ``basis``
+        (idempotent)."""
+        _merge(basis.partial_failures, self.failure_messages)
         _merge(basis.warnings, self.warnings)
         basis.truncated = basis.truncated or self.truncated
         basis.malformed += self.malformed - self._malformed_applied
@@ -1269,7 +1271,7 @@ class IndexerClient:
             msg = M("indexer.partial.more")
             text = render(msg, "en")
         self.partial_failures.append(text)
-        self.failure_messages.append(msg)
+        self.failure_messages.append(sanitize_message(msg, limit=600, secrets=self._secrets()))
 
     def _warn(self, msg: Message) -> None:
         if msg not in self.warnings:

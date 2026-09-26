@@ -96,6 +96,9 @@ BEACON_MIN_ACTIVE_HOURS = 12  # a beacon-like address is active in at least this
 BEACON_MIN_COVERAGE = 0.75  # ...covering at least this share of the hours between its first and last hour,
 BEACON_MIN_RUN_HOURS = 4.0  # ...or in unbroken runs of this many consecutive hours on average (a beacon that only
 # runs while a laptop is on, or during business hours, is still regular: 10 consecutive hours every day)
+PERIODIC_MIN_SHARE = 0.6  # regularity (share of gaps within ~±10% of the usual gap) that makes activity periodic
+MIN_NOISY_ALERTS = 50  # a rule is called "noisy" only from this many alerts in the window...
+MIN_NOISY_PER_DAY = 5.0  # ...and this many per day (NoiseSettings.min_noisy_alerts / min_noisy_per_day override)
 TP_LOOKBACK_DAYS = 90
 EXPOSURE_SHARE = 0.5  # a host-wide scope whose alerts mostly come from public addresses is exposure, not noise
 DEFAULT_SERVICE_ACCOUNT_PATTERNS: tuple[str, ...] = (
@@ -1077,6 +1080,31 @@ def beacon_like(entry: SpaceSavingEntry[Any]) -> bool:
     return runs > 0 and active / runs >= BEACON_MIN_RUN_HOURS
 
 
+def regularity(entry: SpaceSavingEntry[Any]) -> float | None:
+    """Inter-arrival regularity of a sketched value (see :meth:`SpaceSavingEntry.regularity`)."""
+    return entry.regularity()
+
+
+def noisy_thresholds(settings: NoiseSettings) -> tuple[int, float]:
+    """(minimum alerts, minimum alerts per day) before a rule is called noisy (tunable in NoiseSettings)."""
+    alerts = getattr(settings, "min_noisy_alerts", MIN_NOISY_ALERTS)
+    per_day = getattr(settings, "min_noisy_per_day", MIN_NOISY_PER_DAY)
+    return max(0, int(alerts)), max(0.0, float(per_day))
+
+
+def is_noisy(total: int, days: float, settings: NoiseSettings) -> bool:
+    """Enough volume to call a rule noisy: at least ``min_noisy_alerts`` alerts and ``min_noisy_per_day`` per day
+    (a level-12 rule that fired once is not noise, and a rule with 3 alerts a day is not worth tuning)."""
+    min_alerts, min_per_day = noisy_thresholds(settings)
+    return total >= min_alerts and total / max(days, 1.0) >= min_per_day
+
+
+def elapsed_days(window: Window) -> float:
+    """Days elapsed between the first and the last alert (at least 1): the ONE day count used for per-day rates
+    (local calendar dates, ``Window.n_days``, only count presence and bursts)."""
+    return max(1.0, window.duration / 86400.0)
+
+
 # ---- window ------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class Window:
@@ -1128,9 +1156,24 @@ class CoHit:
 
 @dataclass(frozen=True, slots=True)
 class BeaconHit:
+    """A public address with sustained hourly activity inside the scope. It is labelled *beaconing* only when the
+    traffic goes TO it (outbound: C2 is initiated from the inside) and recurs at a steady interval; a public
+    SOURCE active for hours (a scan, a password spray) or irregular traffic is "sustained activity" instead.
+    Either way it blocks tuning."""
+
     value: str
     active_hours: int
     span_hours: int
+    outbound: bool = False
+    regularity: float | None = None  # share of inter-arrival gaps near the usual one (None: unknown)
+
+    @property
+    def periodic(self) -> bool:
+        return self.regularity is not None and self.regularity >= PERIODIC_MIN_SHARE
+
+    @property
+    def beacon(self) -> bool:
+        return self.outbound and self.periodic
 
 
 @dataclass(slots=True)
@@ -1159,8 +1202,9 @@ class CandidateFacts:
     co_index_truncated: bool = False
     external_share: float | None = None  # share of the scope's alerts sourced from public addresses (host scopes)
     beacons: tuple[BeaconHit, ...] = ()
-    dependents: tuple[str, ...] | None = None  # None: ruleset unknown
+    dependents: tuple[str, ...] | None = None  # None: not applicable (non-Wazuh data without a ruleset)
     dependents_error: bool = False
+    dependents_unverified: str | None = None  # "no_ruleset" | "no_stock": correlation links could not be checked
 
     @property
     def share(self) -> float:
@@ -1193,13 +1237,40 @@ class Decision:
 
     @property
     def reasons(self) -> list[Message]:
-        """Failed gates first, then passed ones (every gate outcome is explained)."""
-        failed = [o.message for o in self.outcomes if not o.passed]
+        """Failed gates first, most important first (true positives, beaconing, co-occurrence with high alerts,
+        public addresses, novelty...), then passed ones (every gate outcome is explained)."""
+        failed = sorted(
+            (o for o in self.outcomes if not o.passed),
+            key=lambda o: (_GATE_PRIORITY.get(o.gate, 50), 0 if _is_beacon_message(o.message) else 1),
+        )
         passed = [o.message for o in self.outcomes if o.passed]
-        return failed + passed
+        return [o.message for o in failed] + passed
 
     def failed(self, gate: str) -> bool:
         return any(o.gate == gate and not o.passed for o in self.outcomes)
+
+
+_GATE_PRIORITY: dict[str, int] = {
+    "tp": 0,
+    "tp_rule_wide": 0,
+    "beacon": 1,
+    "co_occurrence": 2,
+    "external": 3,
+    "novelty": 4,
+    "burst": 5,
+    "persistence": 6,
+    "level": 7,
+    "sensitive": 8,
+    "attacker_field": 9,
+    "fim": 10,
+    "check": 10,
+    "aggregate": 11,
+    "dependents": 12,
+}
+
+
+def _is_beacon_message(message: Message) -> bool:
+    return message.key == "noise.reason.beacon"
 
 
 def normalize_tactic(name: str) -> str:
@@ -1417,20 +1488,15 @@ def _gate_cooccurrence(facts: CandidateFacts, settings: NoiseSettings, tenant: T
 
 
 def _gate_beacon(facts: CandidateFacts) -> list[GateOutcome]:
-    return [
-        GateOutcome(
-            "beacon",
-            False,
-            M(
-                "noise.reason.beacon",
-                entity=Entity("ip", hit.value),
-                active=hit.active_hours,
-                span=hit.span_hours,
-            ),
-            "investigate",
-        )
-        for hit in facts.beacons
-    ]
+    return [GateOutcome("beacon", False, beacon_message(hit), "investigate") for hit in facts.beacons]
+
+
+def beacon_message(hit: BeaconHit) -> Message:
+    """Why a public address with sustained activity blocks tuning (beaconing only when outbound and periodic)."""
+    params = {"entity": Entity("ip", hit.value), "active": hit.active_hours, "span": hit.span_hours}
+    if hit.beacon:
+        return M("noise.reason.beacon", **params, regularity=hit.regularity or 0.0)
+    return M("noise.reason.sustained_to" if hit.outbound else "noise.reason.sustained_from", **params)
 
 
 def trusted_internal_anchor(facts: CandidateFacts) -> bool:
@@ -1455,17 +1521,67 @@ def _gate_sensitive(facts: CandidateFacts, settings: NoiseSettings) -> list[Gate
     what: Message | str = ", ".join(tactics)
     if facts.process_creation:
         what = M("noise.label.tactics_and_process", tactics=what) if tactics else M("noise.label.process_creation")
-    params = {
+    params: dict[str, Any] = {
         "tactics": what,
         "fp": lower if lower is not None else 0.0,
         "n": counts.triaged,
         "min_n": settings.min_dispositions,
         "min_fp": FP_EVIDENCE_MIN,
     }
-    if anchored and lower is not None and lower >= FP_EVIDENCE_MIN and not counts.tp:
+    evidence_ok = lower is not None and lower >= FP_EVIDENCE_MIN and not counts.tp
+    if anchored and evidence_ok:
         return [GateOutcome("sensitive", True, M("noise.reason.sensitive_ok", **params))]
-    key = "noise.reason.sensitive_anchor" if not anchored else "noise.reason.sensitive_evidence"
-    return [GateOutcome("sensitive", False, M(key, **params), "investigate")]
+    evidence = evidence_gap(counts, lower, settings)
+    if not anchored:
+        missing = anchor_gap(facts)
+        if evidence is not None:
+            missing = M("noise.reason.and", first=missing, second=evidence)
+        return [
+            GateOutcome(
+                "sensitive", False, M("noise.reason.sensitive_anchor", **params, missing=missing), "investigate"
+            )
+        ]
+    trusted = [c for c in facts.conditions if c.cls.trusted]
+    named_only = all(c.cls.chosen for c in trusted)
+    anchor_key = "noise.reason.anchor_named" if named_only else "noise.reason.anchor_trusted"
+    anchor = M(anchor_key, field=trusted[0].field if trusted else "?")
+    missing_evidence = evidence if evidence is not None else M("noise.evidence.missing")
+    return [
+        GateOutcome(
+            "sensitive",
+            False,
+            M("noise.reason.sensitive_evidence", **params, anchor=anchor, missing=missing_evidence),
+            "investigate",
+        )
+    ]
+
+
+def anchor_gap(facts: CandidateFacts) -> Message:
+    """What keeps the scope from being a trusted internal anchor (for the sensitive-rule reason)."""
+    conds = facts.conditions
+    if not conds:
+        return M("noise.missing.rule_wide")
+    public = [c.field for c in conds if c.cls.external]
+    if public:
+        return M("noise.missing.public", fields=", ".join(dict.fromkeys(public)))
+    chosen = [c.field for c in conds if c.cls.attacker]
+    if chosen:
+        return M("noise.missing.attacker", fields=", ".join(dict.fromkeys(chosen)))
+    not_internal = [c.field for c in conds if c.item is not None and c.item.role in IP_ROLES and not c.cls.internal]
+    if not_internal:
+        return M("noise.missing.not_internal", fields=", ".join(dict.fromkeys(not_internal)))
+    return M("noise.missing.not_trusted", fields=", ".join(dict.fromkeys(c.field for c in conds)))
+
+
+def evidence_gap(counts: DispositionCounts, lower: float | None, settings: NoiseSettings) -> Message | None:
+    """What is missing from the triage evidence (None: FP evidence is sufficient and there is no TP)."""
+    if counts.tp:
+        return M("noise.evidence.tp", tp=counts.tp)
+    if lower is None:
+        return M("noise.evidence.too_few", n=counts.triaged, min_n=settings.min_dispositions, min_fp=FP_EVIDENCE_MIN)
+    if lower < FP_EVIDENCE_MIN:
+        return M("noise.evidence.low_fp", fp=lower, n=counts.triaged, min_fp=FP_EVIDENCE_MIN)
+    return None
 
 
 def _gate_attacker_evidence(facts: CandidateFacts, settings: NoiseSettings) -> list[GateOutcome]:
@@ -1477,7 +1593,7 @@ def _gate_attacker_evidence(facts: CandidateFacts, settings: NoiseSettings) -> l
         return []
     counts = facts.dispositions
     lower = counts.fp_lower_bound(settings.disposition_confidence, settings.min_dispositions)
-    params = {
+    params: dict[str, Any] = {
         "field": chosen[0].field,
         "fp": lower if lower is not None else 0.0,
         "n": counts.triaged,
@@ -1486,7 +1602,10 @@ def _gate_attacker_evidence(facts: CandidateFacts, settings: NoiseSettings) -> l
     }
     if lower is not None and lower >= FP_EVIDENCE_MIN and not counts.tp:
         return [GateOutcome("attacker_field", True, M("noise.reason.attacker_field_ok", **params))]
-    return [GateOutcome("attacker_field", False, M("noise.reason.attacker_field", **params), "investigate")]
+    missing = evidence_gap(counts, lower, settings) or M("noise.evidence.missing")
+    # an account that only LOOKS like a service account (name pattern) is not attacker-chosen: say so
+    key = "noise.reason.attacker_field" if chosen[0].cls.attacker else "noise.reason.named_account"
+    return [GateOutcome("attacker_field", False, M(key, **params, missing=missing), "investigate")]
 
 
 def _gate_external(facts: CandidateFacts) -> list[GateOutcome]:
@@ -1498,11 +1617,8 @@ def _gate_external(facts: CandidateFacts) -> list[GateOutcome]:
     share = facts.external_share
     if share is not None and share >= EXPOSURE_SHARE:
         # muting a host (or a whole rule) for traffic that mostly comes from the Internet hides Internet attacks
-        out.append(
-            GateOutcome(
-                "external", False, M("noise.reason.external_share", share=share, min=EXPOSURE_SHARE), "fix_at_source"
-            )
-        )
+        key = "noise.reason.external_share_all" if share >= 0.995 else "noise.reason.external_share"
+        out.append(GateOutcome("external", False, M(key, share=share, min=EXPOSURE_SHARE), "fix_at_source"))
     return out
 
 
@@ -1517,16 +1633,24 @@ def _gate_source_fix(facts: CandidateFacts) -> list[GateOutcome]:
 def _gate_dependents(facts: CandidateFacts) -> list[GateOutcome]:
     if facts.dependents_error:
         return [GateOutcome("dependents", False, M("noise.reason.dependents_error", rule=facts.rule_id))]
-    if facts.dependents is None:
-        return [GateOutcome("dependents", True, M("noise.reason.dependents_unknown"))]
+    out: list[GateOutcome] = []
     if facts.dependents:
-        return [
+        out.append(
             GateOutcome(
                 "dependents",
                 False,
                 M("noise.reason.dependents", rule=facts.rule_id, dependents=", ".join(facts.dependents)),
             )
-        ]
+        )
+    if facts.dependents_unverified is not None:
+        # "nothing correlates on it" cannot be claimed without the stock correlation rules: review, never a pass
+        key = f"noise.reason.dependents_{facts.dependents_unverified}"
+        out.append(GateOutcome("dependents", False, M(key, rule=facts.rule_id)))
+        return out
+    if out:
+        return out
+    if facts.dependents is None:
+        return [GateOutcome("dependents", True, M("noise.reason.dependents_unknown"))]
     return [GateOutcome("dependents", True, M("noise.reason.no_dependents", rule=facts.rule_id))]
 
 
@@ -1624,10 +1748,26 @@ register(
             "es": "Ningún valor ancla aparece en alertas de nivel {level} o superior dentro de ±{window}",
         },
         "noise.reason.beacon": {
-            "en": "{entity} is active in {active} of the {span} hours between its first and last activity: periodic "
-            "traffic with a public address looks like beaconing",
-            "es": "{entity} está activa en {active} de las {span} horas entre su primera y su última actividad: el "
-            "tráfico periódico con una dirección pública parece beaconing",
+            "en": "Connections to the public address {entity} recur at a steady interval ({regularity:.0%} of the "
+            "gaps between them are about the same) in {active} of the {span} hours between its first and last "
+            "activity: this looks like beaconing (command and control)",
+            "es": "Las conexiones a la dirección pública {entity} se repiten a intervalos regulares (el "
+            "{regularity:.0%} de las pausas entre ellas son casi iguales) en {active} de las {span} horas entre su "
+            "primera y su última actividad: parece beaconing (comando y control)",
+        },
+        "noise.reason.sustained_to": {
+            "en": "Traffic to the public address {entity} is active in {active} of the {span} hours between its "
+            "first and last activity: sustained traffic to the Internet is investigated, not tuned",
+            "es": "El tráfico hacia la dirección pública {entity} está activo en {active} de las {span} horas entre "
+            "su primera y su última actividad: el tráfico sostenido hacia Internet se investiga, no se ajusta",
+        },
+        "noise.reason.sustained_from": {
+            "en": "The public address {entity} is active in {active} of the {span} hours between its first and last "
+            "activity: sustained activity from the Internet (a scan, brute force or password spray) is "
+            "investigated, not tuned",
+            "es": "La dirección pública {entity} está activa en {active} de las {span} horas entre su primera y su "
+            "última actividad: la actividad sostenida desde Internet (un escaneo, fuerza bruta o password spray) "
+            "se investiga, no se ajusta",
         },
         "noise.label.process_creation": {"en": "process creation", "es": "creación de procesos"},
         "noise.label.tactics_and_process": {
@@ -1645,27 +1785,82 @@ register(
             "las disposiciones muestran FP ≥ {fp:.0%} (n={n})",
         },
         "noise.reason.sensitive_anchor": {
-            "en": "Sensitive rule ({tactics}): tuning needs a trusted internal anchor (a configured trusted entity or "
-            "a service account, nothing attacker-controlled) plus FP evidence (FP ≥ {min_fp:.0%} with n ≥ {min_n})",
-            "es": "Regla sensible ({tactics}): para ajustar hace falta un ancla interna de confianza (una entidad de "
-            "confianza configurada o una cuenta de servicio, nada controlable por un atacante) más evidencia de FP "
-            "(FP ≥ {min_fp:.0%} con n ≥ {min_n})",
+            "en": "Sensitive rule ({tactics}): tuning it needs a trusted internal anchor (a configured trusted "
+            "entity or a service account, nothing attacker-controlled) plus FP evidence (FP ≥ {min_fp:.0%} with "
+            "n ≥ {min_n}). Missing: {missing}",
+            "es": "Regla sensible ({tactics}): para ajustarla hace falta un ancla interna de confianza (una entidad "
+            "de confianza configurada o una cuenta de servicio, nada controlable por un atacante) más evidencia de "
+            "FP (FP ≥ {min_fp:.0%} con n ≥ {min_n}). Falta: {missing}",
         },
         "noise.reason.sensitive_evidence": {
-            "en": "Sensitive rule ({tactics}): the anchor is trusted, but dispositions give FP ≥ {fp:.0%} "
-            "(n={n}); needed FP ≥ {min_fp:.0%} with n ≥ {min_n} and no true positives",
-            "es": "Regla sensible ({tactics}): el ancla es de confianza, pero las disposiciones dan "
-            "FP ≥ {fp:.0%} (n={n}); se necesita FP ≥ {min_fp:.0%} con n ≥ {min_n} y ningún verdadero positivo",
+            "en": "Sensitive rule ({tactics}): the scope is anchored on {anchor}, but tuning it also needs FP "
+            "evidence (FP ≥ {min_fp:.0%} with n ≥ {min_n} and no true positives). Missing: {missing}",
+            "es": "Regla sensible ({tactics}): el alcance está anclado en {anchor}, pero para ajustarla también hace "
+            "falta evidencia de FP (FP ≥ {min_fp:.0%} con n ≥ {min_n} y ningún verdadero positivo). Falta: {missing}",
         },
+        "noise.reason.anchor_trusted": {
+            "en": "{field}, a trusted internal entity",
+            "es": "{field}, una entidad interna de confianza",
+        },
+        "noise.reason.anchor_named": {
+            "en": "{field}, an account that looks like a service account by its name only (it is not listed in "
+            "trusted_entities)",
+            "es": "{field}, una cuenta que parece de servicio solo por su nombre (no figura en trusted_entities)",
+        },
+        "noise.reason.and": {"en": "{first}; {second}", "es": "{first}; {second}"},
+        "noise.missing.rule_wide": {
+            "en": "the scope is the whole rule, with no anchor at all",
+            "es": "el alcance es toda la regla, sin ningún ancla",
+        },
+        "noise.missing.public": {
+            "en": "{fields} is a public address",
+            "es": "{fields} es una dirección pública",
+        },
+        "noise.missing.attacker": {
+            "en": "{fields} can be chosen by an attacker",
+            "es": "{fields} puede ser elegido por un atacante",
+        },
+        "noise.missing.not_internal": {
+            "en": "{fields} is not an internal address",
+            "es": "{fields} no es una dirección interna",
+        },
+        "noise.missing.not_trusted": {
+            "en": "none of {fields} is a configured trusted entity or a service account (list it in "
+            "trusted_entities to vouch for it)",
+            "es": "ninguno de {fields} es una entidad de confianza configurada ni una cuenta de servicio (inclúyalo "
+            "en trusted_entities para avalarlo)",
+        },
+        "noise.evidence.tp": {
+            "en": "a clean triage record ({tp} alert(s) in this scope were confirmed as true positives)",
+            "es": "un historial de triaje limpio ({tp} alerta(s) de este alcance se confirmaron como verdaderos "
+            "positivos)",
+        },
+        "noise.evidence.too_few": {
+            "en": "triage evidence: only {n} triaged alert(s) in this scope, at least {min_n} needed to measure "
+            "FP ≥ {min_fp:.0%}",
+            "es": "evidencia de triaje: solo {n} alerta(s) triadas en este alcance, se necesitan al menos {min_n} "
+            "para medir FP ≥ {min_fp:.0%}",
+        },
+        "noise.evidence.low_fp": {
+            "en": "enough false positives: dispositions show FP ≥ {fp:.0%} (n={n}), below the required {min_fp:.0%}",
+            "es": "suficientes falsos positivos: las disposiciones muestran FP ≥ {fp:.0%} (n={n}), por debajo del "
+            "{min_fp:.0%} requerido",
+        },
+        "noise.evidence.missing": {"en": "triage evidence", "es": "evidencia de triaje"},
         "noise.reason.attacker_field": {
-            "en": "The scope relies on {field}, a value nobody vouched for (an attacker can choose it, or it is an "
-            "account trusted only by its name; list it in trusted_entities to vouch for it) that could be seeded "
-            "for weeks to get it tuned: it needs triage evidence, FP ≥ {min_fp:.0%} with n ≥ {min_n} (now "
-            "FP ≥ {fp:.0%}, n={n})",
-            "es": "El alcance depende de {field}, un valor que nadie avaló (un atacante puede elegirlo, o es una "
-            "cuenta de confianza solo por su nombre; inclúyala en trusted_entities para avalarla) y que podría "
-            "sembrarse durante semanas para que se ajuste: necesita evidencia de triaje, FP ≥ {min_fp:.0%} con "
-            "n ≥ {min_n} (ahora FP ≥ {fp:.0%}, n={n})",
+            "en": "The scope relies on {field}, a value an attacker can choose and could seed for weeks to get it "
+            "tuned: it needs FP ≥ {min_fp:.0%} with n ≥ {min_n} and no true positives. Missing: {missing}",
+            "es": "El alcance depende de {field}, un valor que un atacante puede elegir y sembrar durante semanas "
+            "para que se ajuste: necesita FP ≥ {min_fp:.0%} con n ≥ {min_n} y ningún verdadero positivo. "
+            "Falta: {missing}",
+        },
+        "noise.reason.named_account": {
+            "en": "The scope relies on {field}, an account trusted only because its name looks like a service "
+            "account (whoever creates accounts picks their names; list it in trusted_entities to vouch for it): it "
+            "needs FP ≥ {min_fp:.0%} with n ≥ {min_n} and no true positives. Missing: {missing}",
+            "es": "El alcance depende de {field}, una cuenta considerada de confianza solo porque su nombre parece "
+            "de cuenta de servicio (quien crea cuentas elige sus nombres; inclúyala en trusted_entities para "
+            "avalarla): necesita FP ≥ {min_fp:.0%} con n ≥ {min_n} y ningún verdadero positivo. Falta: {missing}",
         },
         "noise.reason.attacker_field_ok": {
             "en": "The scope relies on {field}, a value nobody vouched for, but dispositions show FP ≥ {fp:.0%} "
@@ -1683,6 +1878,11 @@ register(
             "exposure instead of muting the host",
             "es": "Al menos el {share:.0%} de estas alertas proviene de direcciones públicas (límite {min:.0%}): "
             "restrinja la exposición en lugar de silenciar el equipo",
+        },
+        "noise.reason.external_share_all": {
+            "en": "All of these alerts come from public addresses: restrict the exposure instead of muting the host",
+            "es": "Todas estas alertas provienen de direcciones públicas: restrinja la exposición en lugar de "
+            "silenciar el equipo",
         },
         "noise.reason.fim": {
             "en": "File-integrity (syscheck) noise: ignore the path in agent.conf instead of muting the rule",
@@ -1705,18 +1905,31 @@ register(
             "counting demoted events (copying the parent's groups into the child does not keep if_matched_group "
             "rules counting them); validate with wazuh-logtest",
             "es": "La regla {rule} alimenta la(s) regla(s) de correlación {dependents}: requiere revisión. Esas "
-            "reglas pueden dejar de contar los eventos rebajados (copiar los grupos de la regla padre en la hija no "
-            "mantiene el conteo de las reglas if_matched_group); valide con wazuh-logtest",
+            "reglas pueden dejar de contar los eventos degradados (copiar los grupos de la regla padre en la hija "
+            "no mantiene el conteo de las reglas if_matched_group); valide con wazuh-logtest",
         },
         "noise.reason.dependents_error": {
             "en": "Could not determine which rules correlate on rule {rule}: review required",
             "es": "No se pudo determinar qué reglas correlacionan sobre la regla {rule}: requiere revisión",
         },
         "noise.reason.dependents_unknown": {
-            "en": "Ruleset not loaded: correlation dependencies are unknown; validate with wazuh-logtest before "
-            "deploying",
-            "es": "Ruleset no cargado: se desconocen las dependencias de correlación; valide con wazuh-logtest "
-            "antes de desplegar",
+            "en": "No Wazuh ruleset applies to this data: correlation dependencies were not checked",
+            "es": "No hay un ruleset de Wazuh aplicable a estos datos: no se verificaron las dependencias de "
+            "correlación",
+        },
+        "noise.reason.dependents_no_stock": {
+            "en": "Stock ruleset not loaded: correlation dependencies of rule {rule} were not verified (the stock "
+            "correlation rules live in /var/ossec/ruleset/rules): review required. Pass --ruleset "
+            "/var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules",
+            "es": "Ruleset de fábrica no cargado: no se verificaron las dependencias de correlación de la regla "
+            "{rule} (las reglas de correlación de fábrica están en /var/ossec/ruleset/rules): requiere revisión. "
+            "Use --ruleset /var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules",
+        },
+        "noise.reason.dependents_no_ruleset": {
+            "en": "Wazuh ruleset not loaded: correlation dependencies of rule {rule} were not verified: review "
+            "required. Pass --ruleset /var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules",
+            "es": "Ruleset de Wazuh no cargado: no se verificaron las dependencias de correlación de la regla "
+            "{rule}: requiere revisión. Use --ruleset /var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules",
         },
         "noise.reason.no_dependents": {
             "en": "No loaded rule correlates on rule {rule}",

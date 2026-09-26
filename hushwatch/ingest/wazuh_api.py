@@ -45,6 +45,7 @@ from ..net import (
     make_client,
     retry_after,
     safe_url,
+    sanitize_message,
     sanitize_text,
     send_bounded,
     transport_error,
@@ -139,7 +140,7 @@ register(
             "en": "The Wazuh API at {url} rejected the login of {user} (HTTP {status}: {detail}). Check the API "
             "username and password; repeated failures block the source address for a while.",
             "es": "La API de Wazuh de {url} rechazó el inicio de sesión de {user} (HTTP {status}: {detail}). "
-            "Revisa el usuario y la contraseña de la API; los fallos repetidos bloquean temporalmente la "
+            "Revise el usuario y la contraseña de la API; los fallos repetidos bloquean temporalmente la "
             "dirección de origen.",
         },
         "wazuh_api.err.token": {
@@ -160,7 +161,7 @@ register(
             "en": "The Wazuh API kept answering HTTP 429 (request limit reached) to '{op}' after {attempts} "
             "attempts. Lower max_requests_per_minute or run hushwatch later.",
             "es": "La API de Wazuh siguió respondiendo HTTP 429 (límite de peticiones) a '{op}' tras {attempts} "
-            "intentos. Reduce max_requests_per_minute o ejecuta hushwatch más tarde.",
+            "intentos. Reduzca max_requests_per_minute o ejecute hushwatch más tarde.",
         },
         "wazuh_api.err.http": {
             "en": "The Wazuh API returned HTTP {status} for '{op}' (error {code}: {detail}).",
@@ -477,10 +478,10 @@ class WazuhAPI:
 
     # ---- lifecycle -------------------------------------------------------------------------------------------
     def apply_to(self, basis: DataBasis) -> None:
-        """Fold partial failures and warnings into ``basis`` (idempotent)."""
-        for text in self.partial_failures:
-            if text not in basis.partial_failures:
-                basis.partial_failures.append(text)
+        """Fold partial failures (as translatable messages) and warnings into ``basis`` (idempotent)."""
+        for msg in self.failure_messages:
+            if msg not in basis.partial_failures:
+                basis.partial_failures.append(msg)
         for msg in self.warnings:
             if msg not in basis.warnings:
                 basis.warnings.append(msg)
@@ -907,7 +908,7 @@ class WazuhAPI:
             msg = M("wazuh_api.partial.more")
             text = render(msg, "en")
         self.partial_failures.append(text)
-        self.failure_messages.append(msg)
+        self.failure_messages.append(sanitize_message(msg, limit=600, secrets=self._secrets()))
 
     def _warn(self, msg: Message) -> None:
         if msg not in self.warnings:

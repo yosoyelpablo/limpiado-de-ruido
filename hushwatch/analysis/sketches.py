@@ -3,10 +3,12 @@
 * :class:`SpaceSaving` — top-k heavy hitters (Metwally et al. 2005) with the classic guarantees: every key whose
   true weight exceeds ``total / capacity`` is tracked, and for every tracked key
   ``count - error <= true weight <= count``. Each entry also keeps first/last seen, a per-day weight map and an
-  optional bitset of active hours. Everything an entry learns after being (re)admitted is exact; what happened
-  before admission is folded into ``error``. Consequences that matter for safety: ``first_seen`` can only be
-  *later* than the truth and per-day presence can only be *lower*, so novelty/persistence gates err on the side
-  of "investigate".
+  optional bitset of active hours; hour-tracked entries also keep a log-binned histogram of the gaps between
+  consecutive occurrences (:meth:`SpaceSavingEntry.regularity`: does the key recur at a steady interval, like a
+  beacon, or irregularly, like a person or a password spray?). Everything an entry learns after being
+  (re)admitted is exact; what happened before admission is folded into ``error``. Consequences that matter for
+  safety: ``first_seen`` can only be *later* than the truth and per-day presence can only be *lower*, so
+  novelty/persistence gates err on the side of "investigate".
 * :class:`HyperLogLog` — distinct counting with ``2**p`` one-byte registers (p=12: 4 KiB, ~1.6% standard
   error), 64-bit BLAKE2b hashes, the ``alpha_m`` bias constant and linear counting for small cardinalities
   (Flajolet et al. 2007; with a 64-bit hash no large-range correction is needed, Heule et al. 2013).
@@ -32,6 +34,11 @@ K = TypeVar("K", bound=Hashable)
 T = TypeVar("T")
 
 RESERVOIR_SEED = 0x5EED
+# Inter-arrival histogram of hour-tracked entries: gaps (seconds, >= 1) in log bins 10% wide, at most GAP_MAX_BINS
+# distinct bins (1 s to decades fit in ~250 bins; the cap only matters for hostile timestamps).
+GAP_BIN_WIDTH = math.log(1.1)
+GAP_MAX_BINS = 96
+GAP_MIN_SAMPLES = 10  # fewer gaps than this: regularity unknown
 # Hour bitsets and day arrays never grow beyond these spans (hostile timestamps decades apart must not allocate
 # huge objects); the most recent span is kept.
 MAX_HOUR_SPAN = 24 * 366 * 2
@@ -51,6 +58,33 @@ class SpaceSavingEntry(Generic[K]):
     day_counts: array[int] | None = None
     hours: int = 0  # bitset of active hours, bit i == hour (hour_base + i)
     hour_base: int | None = None
+    gap_bins: dict[int, int] | None = None  # log-binned gaps between consecutive occurrences (hour-tracked only)
+    gap_total: int = 0  # gaps counted (including those beyond GAP_MAX_BINS distinct bins)
+
+    def _add_gap(self, gap: float) -> None:
+        """Account the gap (seconds) since the previous occurrence; sub-second repeats are one occurrence."""
+        if gap < 1.0:
+            return
+        self.gap_total += 1
+        bins = self.gap_bins
+        if bins is None:
+            bins = self.gap_bins = {}
+        index = int(math.log(gap) / GAP_BIN_WIDTH)
+        if index in bins:
+            bins[index] += 1
+        elif len(bins) < GAP_MAX_BINS:
+            bins[index] = 1
+
+    def regularity(self) -> float | None:
+        """Share of the gaps between consecutive occurrences that fall within about ±10% of the most common gap
+        (1.0: a metronome, like a beacon; a password spray or a person scores far lower). None when fewer than
+        GAP_MIN_SAMPLES gaps were seen, or the key is not hour-tracked. Only in-order occurrences count, so an
+        unsorted input can only make a key look LESS regular."""
+        bins = self.gap_bins
+        if not bins or self.gap_total < GAP_MIN_SAMPLES:
+            return None
+        best = max(bins.get(i - 1, 0) + c + bins.get(i + 1, 0) for i, c in bins.items())
+        return min(1.0, best / self.gap_total)
 
     @property
     def daily(self) -> dict[int, int]:
@@ -152,7 +186,16 @@ class SpaceSavingEntry(Generic[K]):
                 self.hour_base += trailing
 
     def _absorb(self, other: SpaceSavingEntry[K]) -> None:
-        """Fold another entry's timeline (first/last seen, days, hours) into this one."""
+        """Fold another entry's timeline (first/last seen, days, hours, gaps) into this one."""
+        if other.gap_bins:
+            bins = self.gap_bins if self.gap_bins is not None else {}
+            for index, count in other.gap_bins.items():
+                if index in bins:
+                    bins[index] += count
+                elif len(bins) < GAP_MAX_BINS:
+                    bins[index] = count
+            self.gap_bins = bins
+        self.gap_total += other.gap_total
         if other.first_seen is not None and (self.first_seen is None or other.first_seen < self.first_seen):
             self.first_seen = other.first_seen
         if other.last_seen is not None and (self.last_seen is None or other.last_seen > self.last_seen):
@@ -214,6 +257,8 @@ class SpaceSaving(Generic[K]):
                 last = entry.last_seen
                 if last is None or ts > last:
                     entry.last_seen = ts
+                    if hour is not None and last is not None:
+                        entry._add_gap(ts - last)
                 first = entry.first_seen
                 if first is None or ts < first:
                     entry.first_seen = ts
@@ -252,6 +297,7 @@ class SpaceSaving(Generic[K]):
             victim.hour_base, victim.hours = hour, 1
         else:
             victim.hour_base, victim.hours = None, 0
+        victim.gap_bins, victim.gap_total = None, 0
         self._entries[key] = victim
         heapq.heapreplace(self._heap, (victim.count, next(self._seq), key))
 

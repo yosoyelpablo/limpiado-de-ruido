@@ -18,7 +18,13 @@ demotes the events of the rule(s) it is attached to:
   groups a correlation rule relies on.
 
 Parse errors and duplicate ids become ``assessment.incomplete`` findings: part of the ruleset could not be
-analyzed, and many of those errors also stop ``wazuh-analysisd``.
+analyzed, and many of those errors also stop ``wazuh-analysisd``. So does a ruleset with only LOCAL rules: the
+stock correlation rules (``ruleset/rules``) are missing, so "breaks correlation" can never be established and the
+audit says it was not verified instead of staying silent.
+
+Fixes never suggest demoting a rule that feeds correlation with a child rule: whatever groups a child copies, the
+events it takes are recorded under the child, so the correlation rules stop counting them. The advice is to tune
+the correlation rule itself, or to overwrite the parent (with ``no_log``) knowing what that costs.
 """
 
 from __future__ import annotations
@@ -285,7 +291,7 @@ register(
             "en": "Substring matching on {conditions}: an unanchored value such as 'admin' also matches "
             "'administrator'; anchor it (^...$) or use type=\"pcre2\" with an exact value",
             "es": "Coincidencia por subcadena en {conditions}: un valor sin anclar como 'admin' también coincide "
-            "con 'administrator'; áncorelo (^...$) o use type=\"pcre2\" con un valor exacto",
+            "con 'administrator'; ánclelo (^...$) o use type=\"pcre2\" con un valor exacto",
         },
         "wazuh.audit.reason.broad_network": {
             "en": "Very broad network range on {conditions}",
@@ -356,10 +362,21 @@ register(
             "'expires AAAA-MM-DD'.",
         },
         "wazuh.audit.rec.correlation": {
-            "en": "Do not mute rules that feed correlation: demote with a child that keeps the parent's groups, or "
-            "tune the correlation rule itself, and verify with wazuh-logtest.",
-            "es": "No silencie reglas que alimentan correlaciones: degrade con una regla hija que conserve los "
-            "grupos de la padre, o ajuste la propia regla de correlación, y verifíquelo con wazuh-logtest.",
+            "en": "Do not suppress rules that feed correlation with a child rule: ANY child (even one that copies "
+            "the parent's groups, even a demote) takes the events away from the correlation rules, because "
+            "analysisd records them under the child. Instead, tune the correlation rule itself (an overwrite of it "
+            'with overwrite="yes" and its full body, e.g. a higher frequency or an exclusion of the known '
+            "source), or, if the parent's alerts must go, overwrite the parent with <options>no_log</options> (it "
+            "keeps feeding correlation, but its own alerts are no longer written, for every agent). Verify with "
+            "wazuh-logtest that the correlation rule still fires.",
+            "es": "No suprima con una regla hija las reglas que alimentan correlaciones: CUALQUIER regla hija "
+            "(aunque copie los grupos de la padre, aunque solo degrade) quita los eventos a las reglas de "
+            "correlación, porque analysisd los registra bajo la hija. En su lugar, ajuste la propia regla de "
+            'correlación (una sobrescritura con overwrite="yes" y su cuerpo completo, por ejemplo con una '
+            "frecuencia mayor o una exclusión del origen conocido) o, si las alertas de la padre deben desaparecer, "
+            "sobrescriba la padre con <options>no_log</options> (sigue alimentando la correlación, pero sus "
+            "propias alertas dejan de escribirse, en todos los agentes). Verifique con wazuh-logtest que la regla "
+            "de correlación se sigue disparando.",
         },
         "wazuh.audit.rec.overwrite": {
             "en": "Restore the stock level and thresholds, or replace the overwrite with a narrowly scoped child rule.",
@@ -409,6 +426,36 @@ register(
             "rule on purpose.",
             "es": 'Asigne a cada regla personalizada un id único entre 100000 y 120000, o use overwrite="yes" '
             "cuando reemplace una regla a propósito.",
+        },
+        "wazuh.audit.title.no_stock": {
+            "en": "Stock Wazuh rules were not loaded: correlation checks of the tuning audit were not verified",
+            "es": "No se cargaron las reglas de fábrica de Wazuh: no se verificaron los controles de correlación de "
+            "la auditoría de ajuste",
+        },
+        "wazuh.audit.reason.no_stock": {
+            "en": "Only local rule files were given ({files} file(s)). The stock correlation rules (if_matched_sid, "
+            "if_matched_group and frequency rules such as the brute-force ones) live in /var/ossec/ruleset/rules, "
+            "so the audit cannot tell which local suppressions stop them from firing",
+            "es": "Solo se indicaron archivos de reglas locales ({files} archivo(s)). Las reglas de correlación de "
+            "fábrica (if_matched_sid, if_matched_group y reglas con frequency, como las de fuerza bruta) están en "
+            "/var/ossec/ruleset/rules, así que la auditoría no puede saber qué supresiones locales impiden que se "
+            "disparen",
+        },
+        "wazuh.audit.rec.no_stock": {
+            "en": "Audit the stock and the local rules together: hushwatch audit /var/ossec/ruleset/rules "
+            "/var/ossec/etc/rules (the same pair for --ruleset in report and noise).",
+            "es": "Audite juntas las reglas de fábrica y las locales: hushwatch audit /var/ossec/ruleset/rules "
+            "/var/ossec/etc/rules (el mismo par para --ruleset en report y noise).",
+        },
+        "wazuh.audit.reason.correlation_unverified": {
+            "en": "Its parent rule(s) {ids} are not in the loaded ruleset (the stock rules were not loaded): "
+            "whether they feed correlation rules, and what this suppression breaks, was not verified",
+            "es": "Su(s) regla(s) padre {ids} no están en el ruleset cargado (no se cargaron las reglas de "
+            "fábrica): no se verificó si alimentan reglas de correlación ni qué rompe esta supresión",
+        },
+        "wazuh.audit.action.unverified": {
+            "en": "level {level}, below the triage level; the parent's level is unknown",
+            "es": "nivel {level}, inferior al nivel de triaje; se desconoce el nivel de la regla padre",
         },
         "wazuh.audit.title.no_rules": {
             "en": "No Wazuh rules could be parsed: the tuning audit did not run",
@@ -689,6 +736,8 @@ def _action(rule: WazuhRule, visibility: str) -> Message:
         return M("wazuh.audit.action.drop")
     if visibility == "hide":
         return M("wazuh.audit.action.hide")
+    if visibility == "unverified":
+        return M("wazuh.audit.action.unverified", level=rule.level)
     return M("wazuh.audit.action.demote", level=rule.level)
 
 
@@ -834,6 +883,11 @@ def _suppression_issues(
             )
     if rule.description is None:
         issues.append(_Issue("no_description", Severity.LOW, M("wazuh.audit.reason.no_description")))
+    if not has_stock and issues:
+        unknown = [sid for sid in (rule.if_sid or rule.if_matched_sid) if ruleset.get(sid) is None]
+        if unknown or (rule.if_group and not parents):
+            reason = M("wazuh.audit.reason.correlation_unverified", ids=_ids(unknown or rule.if_group))
+            issues.append(_Issue("correlation_unverified", Severity.LOW, reason))
     return issues
 
 
@@ -1112,12 +1166,32 @@ def audit_ruleset(ruleset: Ruleset, *, tenant: TenantConfig, now: date) -> Audit
             continue  # a base rule, not a suppression of something else
         parents = _parents(ruleset, rule)
         visibility = _visibility(rule, parents)
+        if visibility is None and not has_stock and not parents and 0 < rule.level < tenant.triage_level:
+            # the parent (a stock rule) was not loaded: a local child below the triage level is judged on its own
+            # conditions, and what it breaks in correlation is reported as not verified
+            visibility = "unverified"
         if visibility is None:
             continue
         issues = _suppression_issues(ruleset, rule, parents, visibility, tenant, sensitive, has_stock)
         if issues:
             findings.append(_finding_for(rule, issues, parents, overwrite=False))
 
+    no_stock = bool(ruleset.rules) and not has_stock
+    if no_stock:
+        findings.append(
+            Finding(
+                kind="assessment.incomplete",
+                domain="assessment",
+                title=M("wazuh.audit.title.no_stock"),
+                # partial analysis: MEDIUM, so the assessment is not "OK" (a false green on correlation)
+                severity=Severity.MEDIUM,
+                subject="ruleset:no-stock",
+                reasons=[M("wazuh.audit.reason.no_stock", files=len(ruleset.local_files))],
+                evidence={"files": len(ruleset.files), "local_files": len(ruleset.local_files), "stock_rules": 0},
+                recommendation=M("wazuh.audit.rec.no_stock"),
+                confidence=Confidence.HIGH,
+            )
+        )
     if not ruleset.rules:
         findings.append(
             Finding(
@@ -1135,7 +1209,8 @@ def audit_ruleset(ruleset: Ruleset, *, tenant: TenantConfig, now: date) -> Audit
     if not ruleset.rules:
         status = "not_assessed"
     else:
-        worst = max((f.severity.rank for f in findings), default=Severity.INFO.rank)
+        # the missing stock rules are an assessment gap (reported above), not tuning debt of their own
+        worst = max((f.severity.rank for f in findings if f.subject != "ruleset:no-stock"), default=Severity.INFO.rank)
         status = "fail" if worst >= Severity.HIGH.rank else "warn" if worst >= Severity.MEDIUM.rank else "ok"
     section: dict[str, Any] = {
         "status": status,
@@ -1148,5 +1223,7 @@ def audit_ruleset(ruleset: Ruleset, *, tenant: TenantConfig, now: date) -> Audit
         "duplicate_ids": len(ruleset.duplicates),
         "files": len(ruleset.files),
         "local_files": len(ruleset.local_files),
+        "stock_rules_loaded": has_stock,
+        "correlation_verified": has_stock,
     }
     return AuditResult(findings=findings, section=section)

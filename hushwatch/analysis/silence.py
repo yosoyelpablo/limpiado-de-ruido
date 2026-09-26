@@ -160,6 +160,7 @@ _DECAY_SEV = {"critical": Severity.MEDIUM, "standard": Severity.LOW, "low": Seve
 _STATUS_ORDER = {s: i for i, s in enumerate(("tampering", "silent", "drop", "rule_dark", "decay", "unmonitorable"))}
 _ANOMALOUS = ("silent", "drop", "decay")
 _ALERTS_ONLY = ("alerts", "indexer-alerts")
+_WAZUH_PROFILES = frozenset({"wazuh4", "wazuh5", "mixed", "unknown"})  # "unknown": keep the Wazuh wording
 _ARCHIVES = ("archives", "indexer-archives")
 _WIN_CHANNELS = frozenset(
     {"security", "system", "application", "setup", "forwardedevents", "windows powershell", "hardwareevents"}
@@ -230,10 +231,10 @@ class _KeyEval:
     drop_ratio: float | None = None
     drop_start: float | None = None
     drop_segment: tuple[float, float] | None = None  # (observed, expected) since the change point
-    decay_ratio: float | None = None
+    decay_ratio: float | None = None  # observed / expected events over the recent span (sums, not medians)
     decay_p: float | None = None
-    decay_recent: float = 0.0
-    decay_reference: float = 0.0
+    decay_observed: float = 0.0  # events in the recent span, including the partial current day
+    decay_expected: float = 0.0  # events the reference predicts for the same span
     decay_ref_days: int = 0
     decay_start: int = 0
     decay_days: int = DECAY_RECENT_DAYS  # recent days the DECAY test compared
@@ -269,6 +270,7 @@ class _P1:
     nz: bytes = b""  # 1 per baseline hour with events (calendar hours are 0): quiet-period structure
     i_base: int = 0  # clock index of the first baseline hour
     weekend: bool | None = None  # the key is active on weekends (peer group for the day-off prior); None: unknown
+    rate_shape: list[float] | None = None  # fitted hourly rate per hour-of-week slot (pro-rates a partial day)
 
 
 @dataclass(slots=True)
@@ -842,6 +844,7 @@ class _Engine:
         ev.theta = _persistence(p1, rate_p0, ev.k, self.clock, ev.pi_off > 0.0)
         ev.rate = rate
         ev.rate_p0 = rate_p0
+        p1.rate_shape = rate
         occ = n_days * 3.0 / (7.0 if ev.model == "hour_of_week" else 1.0)
         self._test_silent(ev, occ, rate_alt)
         if ev.level != "rule":
@@ -1191,13 +1194,16 @@ class _Engine:
     def _test_decay(self, ev: _KeyEval, p1: _P1) -> None:
         """Sustained decline: the most recent days against an older reference (up to ``DECAY_SPAN_DAYS``).
 
-        The spec's test compares the last 7 days with the reference, in medians AND in totals (a single noisy
-        statistic does not fire: two days off in a week of a laptop collapse the median, not the total), ratio below
-        ``DECAY_RATIO``. The last 2..6 days are also compared (a drop below ``drop_ratio``): once a partial drop has
-        been in the rolling baseline for a day or two, the DROP test no longer sees it, while this reference predates
-        it. Expectations are per weekday from the reference; the day-to-day variability is the reference's own
-        (inflated for its weekday means being estimated from few days each) as a lognormal multiplier; sources that
-        skip whole days get the same low-day mixture as DROP; the spans are Bonferroni-corrected.
+        The claim is about VOLUME: the events of the recent span (up to the end of the evaluation, the partial current
+        day included, pro-rated by the key's hourly profile) against what the reference predicts for the same span,
+        ratio below ``DECAY_RATIO``. A source that comes back (or bursts) today is therefore not "in decline" because
+        its last full days were quiet. For the 7-day span the median day must agree as well (two days off in a week of
+        a laptop collapse the median, not the total). The last 2..6 days are also compared (a drop below
+        ``drop_ratio``): once a partial drop has been in the rolling baseline for a day or two, the DROP test no longer
+        sees it, while this reference predates it. Expectations are per weekday from the reference; the day-to-day
+        variability is the reference's own (inflated for its weekday means being estimated from few days each) as a
+        lognormal multiplier; sources that skip whole days get the same low-day mixture as DROP; the spans are
+        Bonferroni-corrected.
         """
         days = p1.all_days
         if len(days) < DECAY_MIN_REF_DAYS + 2:
@@ -1241,45 +1247,81 @@ class _Engine:
         den = math.fsum((t - e) * (t - e) - t for e, t in ref_exp)
         cv2 = max(1.0 / stats.mom_size_from_sums(num, den), math.expm1(_day_log_sigma(ref_exp) ** 2))
         pi_low = max(ev.pi_off, ev.pi_low)
+        # the partial current day (after the last full day, up to the end of the evaluation): observed so far, and
+        # its expected share of that weekday's volume from the key's hourly profile
+        partial = self._partial_day(p1, last_day)
+        p_day, p_observed, p_expected = -1, 0.0, 0.0
+        if partial is not None:
+            p_day, p_observed, p_fraction = partial
+            p_expected = expect(clock.day_dow[p_day]) * p_fraction
+        ev.decay_ref_days = len(reference)
         spans = range(2, DECAY_RECENT_DAYS + 1)
-        best: tuple[float, int, float, float, float] | None = None  # (log p, span, ratio, recent median, observed)
+        best: tuple[float, int, float, float, float] | None = None  # (log p, span, ratio, observed, expected)
         for span in spans:
             recent = [(j, t) for j, t in days if j > last_day - span]
             if len(recent) < (DECAY_MIN_RECENT_DAYS if span == DECAY_RECENT_DAYS else max(2, span - 2)):
                 continue
             expected_by_day = {j: expect(clock.day_dow[j]) for j, _ in recent}
             observed = math.fsum(t for _, t in recent)
+            if p_expected > 0:
+                expected_by_day[p_day] = p_expected
+                observed += p_observed
             expected = math.fsum(expected_by_day.values())
             if expected <= 0:
                 continue
             ratio = observed / expected
-            med_recent = stats.median(t for _, t in recent)
             if span == DECAY_RECENT_DAYS:
-                ev.decay_ratio = ratio
-                ev.decay_recent, ev.decay_reference, ev.decay_ref_days = med_recent, med_ref, len(reference)
+                ev.decay_ratio, ev.decay_observed, ev.decay_expected = ratio, observed, expected
                 ev.decay_start = clock.day_first[recent[0][0]] + clock.start
+                med_recent = stats.median(t for _, t in recent)
                 if ratio >= DECAY_RATIO or med_recent >= DECAY_RATIO * med_ref:
                     continue
             elif ratio >= self.cfg.drop_ratio:
                 continue
             spread = math.fsum(e * e for e in expected_by_day.values()) * cv2
             sigma = math.sqrt(math.log1p(spread / (expected * expected))) if spread > 0 else 0.0
-            size = ev.k * 24.0 * len(recent)  # hourly overdispersion of the recent total (the day part is sigma)
+            size = ev.k * 24.0 * len(expected_by_day)  # hourly overdispersion of the recent total (the day part: sigma)
             log_p = self._drop_logcdf(observed, expected, size, pi_low, expected_by_day, sigma, len(reference) - 1.0)
             log_p = min(0.0, log_p + math.log(len(spans)))
             if best is None or log_p < best[0]:
-                best = (log_p, span, ratio, med_recent, observed)
+                best = (log_p, span, ratio, observed, expected)
         if best is None:
             return
-        log_p, span, ratio, med_recent, _ = best
+        log_p, span, ratio, observed, expected = best
         ev.decay_p = math.exp(log_p)
         if log_p < self.log_alpha:
             ev.status = "decay"
             ev.decay_days = span
-            ev.decay_ratio = ratio
-            ev.decay_recent = med_recent
+            ev.decay_ratio, ev.decay_observed, ev.decay_expected = ratio, observed, expected
             recent_first = min(j for j, _ in days if j > last_day - span)
             ev.decay_start = clock.day_first[recent_first] + clock.start
+
+    def _partial_day(self, p1: _P1, last_day: int) -> tuple[int, float, float] | None:
+        """The local day after ``last_day`` that the evaluation end cuts short: (day index, events observed so far,
+        expected fraction of the day's volume in the observed hours per the hourly profile). None when there is none
+        (the evaluation ends at a day boundary, or the day is a calendar day)."""
+        clock = self.clock
+        i_end = clock.index(self.end_hour)
+        if i_end <= 0 or i_end > clock.n:
+            return None
+        j = clock.day[i_end - 1]
+        if j <= last_day or clock.day_cal[j]:
+            return None
+        first = clock.day_first[j]
+        hours = i_end - first
+        if hours <= 0 or hours > len(p1.tail):
+            return None
+        observed = float(sum(p1.tail[len(p1.tail) - hours :]))
+        rate = p1.rate_shape
+        if rate is None:
+            return j, observed, min(1.0, hours / 24.0)
+        slot = clock.slot
+        dow = clock.day_dow[j]
+        day_total = math.fsum(rate[dow * 24 : dow * 24 + 24])
+        if day_total <= 0:
+            return j, observed, min(1.0, hours / 24.0)
+        seen = math.fsum(rate[slot[i]] for i in range(first, i_end))
+        return j, observed, min(1.0, seen / day_total)
 
     def _q_values(self) -> None:
         tested = [ev for ev in self.evals.values() if ev.evaluated]
@@ -1473,8 +1515,12 @@ class _Engine:
             pending = [kid for kid in anomalous if not kid.final]
             if owned and self._attributable(parent, owned):
                 # e.g. the hosts that carried most of this log source are down: their findings cover it
+                owner = owned[0].explained_by
                 parent.final = "explained"
-                parent.explained_by = owned[0].explained_by
+                parent.explained_by = owner
+                parent.explained_global = owned[0].explained_global
+                if owner is not None and not parent.explained_global:
+                    owner.children.append(parent)  # listed (and linked) by the finding that owns it
                 continue
             single = self._single_cause(parent, pending)
             if single is not None:
@@ -1850,26 +1896,21 @@ class _Engine:
                         ratio=seg_observed / seg_expected,
                     )
                 )
-        elif ev.status == "decay" and ev.decay_days < DECAY_RECENT_DAYS:
-            reasons.append(
-                M(
-                    "silence.reason.decay_days",
-                    days=ev.decay_days,
-                    ratio=ev.decay_ratio or 0.0,
-                    ref_days=ev.decay_ref_days,
-                    p=ev.decay_p if ev.decay_p is not None else 1.0,
-                )
-            )
         elif ev.status == "decay":
             reasons.append(
                 M(
                     "silence.reason.decay",
-                    recent=ev.decay_recent,
-                    reference=ev.decay_reference,
+                    days=ev.decay_days,
+                    observed=round(ev.decay_observed),
+                    expected=ev.decay_expected,
+                    ratio=ev.decay_ratio or 0.0,
                     ref_days=ev.decay_ref_days,
+                    until=iso(_dt(self.end)) or "-",
                     p=ev.decay_p if ev.decay_p is not None else 1.0,
                 )
             )
+            if ev.decay_days < DECAY_RECENT_DAYS:
+                reasons.append(M("silence.reason.decay_days"))
         reasons.extend(self._common_reasons(ev))
         agent_reasons, conf_override = self._agent_reasons(ev)
         reasons.extend(agent_reasons)
@@ -2008,7 +2049,7 @@ class _Engine:
             "window": {"start": iso(_dt(lo)), "end": iso(_dt(hi))},
             "alpha_eff": self.alpha,
             "explained_count": len(explained),
-            "explained": [_key_dict(ev.level, ev.key) for ev in explained[:MAX_EXPLAINED_EVIDENCE]],
+            "explained": [_explained_item(ev) for ev in explained[:MAX_EXPLAINED_EVIDENCE]],
             "agents": [Entity("host", ev.key[0]) for ev in self.global_agents[:MAX_EXPLAINED_EVIDENCE]],
         }
         if source.level == "tenant" and source.total > 0:
@@ -2067,7 +2108,7 @@ class _Engine:
             subject="global_silence",
             reasons=reasons,
             evidence=evidence,
-            recommendation=M("silence.rec.global"),
+            recommendation=M("silence.rec.global" if self.profile in _WAZUH_PROFILES else "silence.rec.global_generic"),
             confidence=Confidence.LOW if self.partial else Confidence.HIGH,
             score=float(len(explained)),
             tenant=self.tenant.name,
@@ -2086,7 +2127,12 @@ class _Engine:
             host_level = next((e for e in items if e.level == "agent"), None)
             main = host_level or items[0]
             t_min = main.t_min if main.t_min is not None else math.inf
-            t_text = humanize(timedelta(hours=t_min)) if not math.isinf(t_min) else "> 28d"
+            # beyond the horizon no duration is "about" right: the text says "more than 28d" instead
+            t_text: Message | str = (
+                M("silence.duration.about", duration=humanize(timedelta(hours=t_min)))
+                if not math.isinf(t_min)
+                else M("silence.duration.beyond", duration=humanize(timedelta(hours=TMIN_HORIZON_H)))
+            )
             key_msg = _key_message(main.level, main.key)
             if host_level is not None:
                 title = M("silence.title.unmonitorable", key=key_msg, t_min=t_text, sla=humanize(sla))
@@ -2146,7 +2192,7 @@ class _Engine:
                     kind="assessment.learning",
                     domain="assessment",
                     title=M("silence.title.nothing_evaluable", days=days),
-                    severity=Severity.MEDIUM,
+                    severity=Severity.LOW,  # learning is LOW everywhere; the section says not_assessed (grey)
                     subject="silence:learning",
                     reasons=[
                         M("silence.reason.learning", count=len(learning), critical=_critical_count(learning), days=days)
@@ -2249,16 +2295,29 @@ class _Engine:
             }
         if ev.decay_ratio is not None:
             evidence["decay"] = {
-                "recent_median": ev.decay_recent,
-                "reference_median": ev.decay_reference,
-                "reference_days": ev.decay_ref_days,
                 "recent_days": ev.decay_days,
+                "since": iso(_dt(ev.decay_start * 3600.0)),
+                "observed": round(ev.decay_observed, 3),
+                "expected": round(ev.decay_expected, 3),
                 "ratio": ev.decay_ratio,
+                "reference_days": ev.decay_ref_days,
                 "p": ev.decay_p,
             }
+        if ev.status == "decay":
+            # the numbers at the top describe the claim of the finding: the recent span against its reference (the
+            # last-window DROP test numbers would contradict it: they cover another period)
+            evidence.update(
+                {
+                    "observed": round(ev.decay_observed, 3),
+                    "expected": round(ev.decay_expected, 3),
+                    "ratio": ev.decay_ratio,
+                    "p": ev.decay_p,
+                    "window": {"start": iso(_dt(ev.decay_start * 3600.0)), "end": iso(_dt(self.end))},
+                }
+            )
         if ev.children:
             evidence["explained_count"] = len(ev.children)
-            evidence["explained"] = [_key_dict(kid.level, kid.key) for kid in ev.children[:MAX_EXPLAINED_EVIDENCE]]
+            evidence["explained"] = [_explained_item(kid) for kid in ev.children[:MAX_EXPLAINED_EVIDENCE]]
         if self.agents is not None and ev.level in ("agent", "agent_log_source"):
             info = self.inventory.get(ev.key[0].lower())
             evidence["agent_status"] = info.status if info else "not_registered"
@@ -2266,28 +2325,33 @@ class _Engine:
         return evidence
 
     def _filter(self, level: str, key: tuple[str, ...]) -> tuple[Message, dict[str, Any]]:
+        """Reproduce hint for a key, in the field names of the input (a generic mapping's own column names; a
+        description when the column is not known)."""
         profile = self.profile
+        host_f: str | None
+        rule_f: str | None
+        ls_f: str | None
         if profile == "ecs":
-            host_f, rule_f = "host.name", "kibana.alert.rule.uuid"
-            ls_f = "event.dataset"
+            host_f, rule_f, ls_f = "host.name", "kibana.alert.rule.uuid", "event.dataset"
         elif profile in ("wazuh4", "wazuh5", "unknown", "mixed"):
             host_f, rule_f = "agent.name", "rule.id"
-            ls_f = ""
-        else:
-            host_f, rule_f, ls_f = "source", "rule_id", "log_source"
+            ls_f = _wazuh_ls_field(key[-1]) if level in ("log_source", "agent_log_source") else None
+        else:  # generic: the columns the mapping names (heuristic columns are not known here)
+            mapped = _generic_columns(self.tenant)
+            host_f, rule_f, ls_f = mapped.get("host"), mapped.get("rule"), mapped.get("log_source")
         if level == "tenant":
             return M("silence.filter.all"), {}
         if level == "rule":
-            return M("silence.filter.one", field=rule_f, value=_quoted(key[0])), {rule_f: key[0]}
+            return _term(rule_f, "rule", _quoted(key[0])), {rule_f or "rule_id": key[0]}
+        host = Entity("host", key[0])
         if level == "agent":
-            return M("silence.filter.one", field=host_f, value=Entity("host", key[0])), {host_f: Entity("host", key[0])}
+            return _term(host_f, "host", host), {host_f or "host": host}
         ls = key[-1]
-        field_ls = ls_f or _wazuh_ls_field(ls)
         if level == "log_source":
-            return M("silence.filter.one", field=field_ls, value=_quoted(ls)), {field_ls: ls}
+            return _term(ls_f, "log_source", _quoted(ls)), {ls_f or "log_source": ls}
         return (
-            M("silence.filter.two", field1=host_f, value1=Entity("host", key[0]), field2=field_ls, value2=_quoted(ls)),
-            {host_f: Entity("host", key[0]), field_ls: ls},
+            M("silence.filter.and", first=_term(host_f, "host", host), second=_term(ls_f, "log_source", _quoted(ls))),
+            {host_f or "host": host, ls_f or "log_source": ls},
         )
 
     def _section(self, keys_evaluated: int, findings: list[Finding]) -> dict[str, Any]:
@@ -2356,7 +2420,7 @@ class _Engine:
         elif ev.status in ("drop",):
             observed, expected, p = ev.observed, ev.expected, ev.drop_p
         elif ev.status == "decay":
-            observed, expected, p = ev.decay_recent, ev.decay_reference, ev.decay_p
+            observed, expected, p = ev.decay_observed, ev.decay_expected, ev.decay_p
         else:
             observed, expected, p = ev.day_observed, ev.day_expected, (math.exp(ev.log_p0) if ev.evaluated else None)
         return {
@@ -2803,6 +2867,35 @@ def _key_message(level: str, key: tuple[str, ...]) -> Message:
     return M("silence.key.rule", rule_id=key[0])
 
 
+def _explained_item(ev: _KeyEval) -> Message:
+    """One explained key as a readable line (evidence ``explained``): "Security on dc02 (silent)"."""
+    status = ev.status if ev.status in _EXPLAINED_STATUSES else "silent"
+    return M("silence.explained.item", key=_key_message(ev.level, ev.key), status=M(f"silence.status.{status}"))
+
+
+_EXPLAINED_STATUSES = frozenset({"silent", "drop", "decay", "rule_dark", "tampering"})
+
+
+def _term(field: str | None, what: str, value: Any) -> Message:
+    """``field:"value"`` when the input's field name is known, else a plain description ("host \"x\"")."""
+    if field:
+        return M("silence.filter.one", field=field, value=value)
+    return M(f"silence.filter.desc.{what}", value=value)
+
+
+def _generic_columns(tenant: TenantConfig) -> dict[str, str]:
+    """Columns a generic field mapping names for the host, log source and rule id (first alternative of ``a|b``),
+    when every configured input that maps the field agrees on it."""
+    found: dict[str, set[str]] = {}
+    for item in tenant.inputs:
+        mapping = item.mapping if isinstance(item.mapping, dict) else {}
+        for ours, names in (("host", ("source", "host")), ("log_source", ("log_source",)), ("rule", ("rule_id",))):
+            raw = next((mapping[n] for n in names if isinstance(mapping.get(n), str) and mapping[n].strip()), None)
+            if raw is not None:
+                found.setdefault(ours, set()).add(raw.split("|", 1)[0].strip())
+    return {ours: next(iter(values)) for ours, values in found.items() if len(values) == 1 and all(values)}
+
+
 def _wazuh_ls_field(log_source: str) -> str:
     """Wazuh 4.x log_source is ``data.win.system.channel`` for Windows events, else ``location``."""
     lowered = log_source.lower()
@@ -2853,10 +2946,13 @@ register(
         # filters (reproduce hints; field names are never translated)
         "silence.filter.all": {"en": "all events of the tenant", "es": "todos los eventos del tenant"},
         "silence.filter.one": {"en": '{field}:"{value}"', "es": '{field}:"{value}"'},
-        "silence.filter.two": {
-            "en": '{field1}:"{value1}" AND {field2}:"{value2}"',
-            "es": '{field1}:"{value1}" AND {field2}:"{value2}"',
+        "silence.filter.and": {"en": "{first} AND {second}", "es": "{first} AND {second}"},
+        "silence.filter.desc.host": {"en": 'the events of host "{value}"', "es": 'los eventos del equipo "{value}"'},
+        "silence.filter.desc.log_source": {
+            "en": 'log source "{value}"',
+            "es": 'la fuente de logs "{value}"',
         },
+        "silence.filter.desc.rule": {"en": 'the alerts of rule "{value}"', "es": 'las alertas de la regla "{value}"'},
         # titles
         "silence.title.silent": {
             "en": "Silent source: {key} has sent no events for {gap}",
@@ -2881,9 +2977,9 @@ register(
             "es": "Posible manipulación de registros ({key}): silencio justo después de {precursor}",
         },
         "silence.title.unmonitorable": {
-            "en": "Critical source not monitorable by volume: {key} needs about {t_min} of silence before it can be "
+            "en": "Critical source not monitorable by volume: {key} needs {t_min} of silence before it can be "
             "detected (SLA {sla})",
-            "es": "Fuente crítica no vigilable por volumen ({key}): hacen falta unas {t_min} de silencio para "
+            "es": "Fuente crítica no monitoreable por volumen ({key}): hacen falta {t_min} de silencio para "
             "detectarlo (SLA {sla})",
         },
         "silence.title.unmonitorable_channels": {
@@ -2948,17 +3044,21 @@ register(
             "esperados ({ratio:.0%}).",
         },
         "silence.reason.decay": {
-            "en": "Median of the last 7 days: {recent:,.0f} events/day vs {reference:,.0f} over the {ref_days} "
-            "previous days (p = {p:.1e}).",
-            "es": "Mediana de los últimos 7 días: {recent:,.0f} eventos/día frente a {reference:,.0f} en los "
-            "{ref_days} días anteriores (p = {p:.1e}).",
+            "en": "Over the last {days} days (up to {until}) it sent {observed} events, {ratio:.0%} of the about "
+            "{expected:,.0f} expected from the {ref_days} earlier days (p = {p:.1e}).",
+            "es": "En los últimos {days} días (hasta {until}) envió {observed} eventos, el {ratio:.0%} de los unos "
+            "{expected:,.0f} esperados según los {ref_days} días anteriores (p = {p:.1e}).",
         },
         "silence.reason.decay_days": {
-            "en": "Over the last {days} days it sent {ratio:.0%} of the volume expected from the {ref_days} earlier "
-            "days (p = {p:.1e}): a sustained loss the rolling baseline would soon absorb.",
-            "es": "En los últimos {days} días envió el {ratio:.0%} del volumen esperado según los {ref_days} días "
-            "anteriores (p = {p:.1e}): una pérdida sostenida que la línea base móvil pronto absorbería.",
+            "en": "A sustained loss that the rolling baseline would soon absorb, so it is reported now.",
+            "es": "Una pérdida sostenida que la línea base móvil pronto absorbería; por eso se informa ahora.",
         },
+        "silence.explained.item": {"en": "{key} ({status})", "es": "{key}: {status}"},
+        "silence.status.silent": {"en": "silent", "es": "en silencio"},
+        "silence.status.drop": {"en": "volume drop", "es": "caída de volumen"},
+        "silence.status.decay": {"en": "sustained decline", "es": "descenso sostenido"},
+        "silence.status.rule_dark": {"en": "rule stopped firing", "es": "la regla dejó de dispararse"},
+        "silence.status.tampering": {"en": "possible tampering", "es": "posible manipulación"},
         "silence.reason.profile": {
             "en": "Profile: {duty}, tier {tier}, {days} days of baseline ({model}), dispersion k = {k:.1f}.",
             "es": "Perfil: {duty}, nivel {tier}, {days} días de línea base ({model}), dispersión k = {k:.1f}.",
@@ -3047,10 +3147,12 @@ register(
         },
         "silence.reason.unmonitorable": {
             "en": "With its normal traffic ({rate:,.2f} events/h) a silence becomes statistically detectable only "
-            "after about {t_min}; the SLA for tier {tier} is {sla}.",
+            "after {t_min}; the SLA for tier {tier} is {sla}.",
             "es": "Con su tráfico normal ({rate:,.2f} eventos/h) un silencio solo es detectable estadísticamente "
-            "tras unas {t_min}; el SLA del nivel {tier} es {sla}.",
+            "tras {t_min}; el SLA del nivel {tier} es {sla}.",
         },
+        "silence.duration.about": {"en": "about {duration}", "es": "unas {duration}"},
+        "silence.duration.beyond": {"en": "more than {duration}", "es": "más de {duration}"},
         "silence.reason.learning": {
             "en": "Keys still learning: {count} (critical agents among them: {critical}). A key is evaluated once it "
             "has {days} days of history; until then its silence is not assessed.",
@@ -3097,7 +3199,7 @@ register(
         "silence.rec.unmonitorable": {
             "en": "Add a heartbeat for {key} (agent keepalive monitoring, a scheduled canary event or periodic command "
             "output) so its silence can be detected within the SLA.",
-            "es": "Añada un latido (heartbeat) a esta fuente ({key}): vigilancia del keepalive del agente, un evento "
+            "es": "Agregue un latido (heartbeat) a esta fuente ({key}): vigilancia del keepalive del agente, un evento "
             "canario programado o la salida periódica de un comando, para poder detectar su silencio dentro del SLA.",
         },
         "silence.rec.global": {
@@ -3106,6 +3208,13 @@ register(
             "es": "Revise primero el manager, el indexador y la canalización de ingesta (espacio en disco, índices en "
             "solo lectura, límite de shards, descartes de remoted/analysisd, Filebeat) antes de investigar agentes "
             "individuales.",
+        },
+        "silence.rec.global_generic": {
+            "en": "Check the collectors, forwarders, ingest pipeline and indexer first (disk space, read-only indices, "
+            "shard limits, dropped or queued events) before investigating individual hosts.",
+            "es": "Revise primero los recolectores, reenviadores, la canalización de ingesta y el indexador "
+            "(espacio en disco, índices en solo lectura, límite de shards, eventos descartados o encolados) antes "
+            "de investigar equipos individuales.",
         },
         "silence.rec.learning": {
             "en": "Keep collecting data: a source is evaluated once it has enough history. Until then its silence is "

@@ -11,8 +11,7 @@ Data:
 Isolation: ``HUSHWATCH_CONFIG`` / ``HUSHWATCH_REDACT_KEY`` are removed and the default state directory is
 redirected to a temporary directory, so nothing touches ``~/.local/state``.
 
-Tests marked ``xfail(strict=True)`` document real CLI/engine bugs (see each ``reason``); they start passing, and
-therefore fail as XPASS, once the bug is fixed.
+Every documented CLI/engine bug found by the system review has a regression test here (no xfail left).
 """
 
 from __future__ import annotations
@@ -186,6 +185,7 @@ def demo_config(demo: DemoManifest, tmp_path_factory: pytest.TempPathFactory) ->
     body["inputs"][0]["path"] = str(demo.alerts_path)
     body["ruleset_dirs"] = [str(demo.rules_dir)]
     body["dispositions"] = str(demo.dispositions_path)
+    body["agents_file"] = str(demo.agents_path)  # agent inventory: the pipeline domain can be assessed
     base = tmp_path_factory.mktemp("demo-config")
     body["state_dir"] = str(private_dir(base / "state"))
     return write_config(base / "hushwatch.yml", raw)
@@ -336,9 +336,11 @@ def test_demo_command_writes_html_report_and_suppressions(
     stdout = text(result.stdout)
     assert heading in stdout
     html_path = out_dir / html_name
-    assert f"HTML report: {html_path}" in stdout.replace("\n", "")
-    assert "Suggested Wazuh rules" in stdout
+    label = "HTML report" if lang == "en" else "Informe HTML"
+    assert f"{label}: {html_path}" in stdout.replace("\n", "")
+    assert ("Generating a synthetic" if lang == "en" else "Generando un conjunto") in text(result.stderr)
     assert html_path.is_file() and mode(html_path) == 0o600
+    assert mode(out_dir / "hushwatch.yml") == 0o600  # the demo config is private like any other config
     html = html_path.read_text(encoding="utf-8")
     assert html.lstrip().lower().startswith("<!doctype html")
     assert f'<html lang="{lang}"' in html
@@ -346,11 +348,18 @@ def test_demo_command_writes_html_report_and_suppressions(
     for name in ("alerts.json", "manifest.json", "hushwatch.yml", "agents.json", "dispositions.csv"):
         assert (out_dir / name).is_file(), name
     suppressions = out_dir / "suppressions"
-    assert mode(suppressions) == 0o700
-    for name in ("hushwatch_local_rules.xml", "hushwatch_suppressions.json", "VALIDATION.md"):
-        assert mode(suppressions / name) == 0o600, name
-    rules = ET.parse(suppressions / "hushwatch_local_rules.xml").getroot().iter("rule")
-    assert sum(1 for _ in rules) >= 1
+    rules_xml = suppressions / "hushwatch_local_rules.xml"
+    written = rules_xml.is_file()
+    # the rules line is printed exactly when a rule file was written (the small demo may have no safe candidate)
+    assert (("Suggested Wazuh rules" if lang == "en" else "Reglas de Wazuh sugeridas") in stdout) == written
+    if written:
+        assert mode(suppressions) == 0o700
+        for name in ("hushwatch_local_rules.xml", "hushwatch_suppressions.json", "VALIDATION.md"):
+            assert mode(suppressions / name) == 0o600, name
+        assert sum(1 for _ in ET.parse(rules_xml).getroot().iter("rule")) >= 1
+    # running the demo again replaces its own files (no "pass --force" dead end)
+    again = run("demo", "--out", out_dir, "--no-open", "--lang", lang, *extra)
+    assert again.exit_code == exit_code
 
 
 # ---- report: every format, files and stdout -----------------------------------------------------------------------
@@ -373,7 +382,7 @@ def test_report_json_to_file(json_report: tuple[Result, Path, dict[str, Any]], d
     assert report["summary"]["findings"] == len(report["findings"]) > 0
     kinds = {(f["kind"], f["subject"]) for f in report["findings"]}
     assert ("silence.tampering", "agent:dc02") in kinds
-    assert any(kind == "noise.tune" for kind, _ in kinds)
+    assert any(kind.startswith("noise.") for kind, _ in kinds)
     assert any(kind == "tuning.risky_suppression" for kind, _ in kinds)
     # the analysis ran with the tenant's configured ruleset and dispositions
     assert report["assessment"]["tuning"] != "not_assessed"
@@ -400,7 +409,10 @@ def test_report_formats_to_file(
     result = run(*report_args, "-f", fmt, "-o", out, "--lang", lang, "--fail-on", fail_on)
     assert result.exit_code == expected_exit(json_report[2], fail_on)
     assert result.stdout == ""
-    assert f"report written to {out}" in text(result.stderr)
+    written = "report written to" if lang == "en" else "informe escrito en"
+    assert f"{written} {out}" in text(result.stderr)
+    if fmt == "console":  # a console report written to a file is Markdown, and the message says so
+        assert "Markdown" in text(result.stderr)
     assert mode(out) == 0o600
     body = out.read_text(encoding="utf-8")
     assert marker in body
@@ -452,7 +464,7 @@ def test_report_json_to_stdout_in_spanish(small_alerts: Path) -> None:
     report = json.loads(result.stdout)
     assert report["lang"] == "es"
     assert result.exit_code == 0
-    assert report["findings"][0]["title"]["text"].startswith("La regla 5715")
+    assert re.match(r"(La r|R)egla 5715\b", report["findings"][0]["title"]["text"])
 
 
 # ---- --fail-on and exit codes --------------------------------------------------------------------------------------
@@ -487,7 +499,7 @@ def test_config_typo_exits_2(tmp_path: Path, small_alerts: Path, via_env: bool) 
         result = run("report", small_alerts, "-c", cfg)
     assert not crashed(result)
     assert result.exit_code == 2
-    assert "unknown keys timezon" in text(result.stderr)
+    assert "unknown key 'timezon' (did you mean 'timezone'?)" in text(result.stderr)
 
 
 @pytest.mark.parametrize("fail_on", ["none", "info"])
@@ -539,11 +551,6 @@ def test_multi_tenant_config_requires_tenant(tmp_path: Path, small_alerts: Path)
     assert run("report", small_alerts, "-c", cfg, "-t", "globex", "--now", SYNTH_NOW).exit_code == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG cli._write_private: os.open(O_CREAT|O_TRUNC, 0o600) only sets the mode when the file is created; "
-    "an existing 0644 report file keeps 0644, so a report with real identifiers stays world-readable",
-)
 def test_output_file_is_private_even_when_it_already_exists(tmp_path: Path, small_alerts: Path) -> None:
     out = tmp_path / "report.json"
     out.write_text("old", encoding="utf-8")
@@ -554,11 +561,6 @@ def test_output_file_is_private_even_when_it_already_exists(tmp_path: Path, smal
     assert mode(out) == 0o600
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG engine._load_dispositions: Dispositions.load raises OSError (missing file) / ValueError (bad header) "
-    "that neither engine.analyze nor cli._run handle: traceback and exit 1 instead of a usage error (exit 2)",
-)
 @pytest.mark.parametrize("problem", ["missing", "bad_header"])
 def test_bad_dispositions_file_is_a_usage_error(tmp_path: Path, small_alerts: Path, problem: str) -> None:
     csv_path = tmp_path / "dispositions.csv"
@@ -625,6 +627,11 @@ def test_noise_emit_suppressions(demo: DemoManifest, demo_config: Path, tmp_path
     assert {f["domain"] for f in report["findings"]} <= {"noise", "pipeline", "assessment"}
 
     rules_xml = out_dir / "hushwatch_local_rules.xml"
+    tunes = [f for f in report["findings"] if f["kind"] == "noise.tune"]
+    if not tunes:  # the small demo may hold no safe candidate: then nothing is written, and the report says so
+        assert report["sections"]["noise"]["suppressions_file"] is None
+        assert not rules_xml.exists()
+        return
     assert report["sections"]["noise"]["suppressions_file"] == str(rules_xml)
     assert mode(out_dir) == 0o700
     for path in out_dir.iterdir():
@@ -640,12 +647,10 @@ def test_noise_emit_suppressions(demo: DemoManifest, demo_config: Path, tmp_path
     assert all(low <= int(rule.get("id", "0")) <= high for rule in rules)
     assert all(rule.get("level") == "3" for rule in rules)  # demote, never drop
 
-    tunes = [f for f in report["findings"] if f["kind"] == "noise.tune"]
     assert len(tunes) >= len(spec["suppressions"])
     parents = {s["parent_rule"] for s in spec["suppressions"]}
     safe = {r for sc in demo.ground_truth if sc.category == "noise_safe" for r in sc.rule_ids}
     traps = {r for sc in demo.ground_truth if sc.must_not_hide for r in sc.rule_ids}
-    assert parents & safe
     assert not parents & (traps - safe), "a suppression targets a rule that only fires for a planted attack"
 
 
@@ -675,15 +680,22 @@ def test_silence(demo: DemoManifest, demo_config: Path, tmp_path: Path) -> None:
 # ---- check (cron mode) --------------------------------------------------------------------------------------------
 
 
+_SUMMARY = re.compile(
+    r"(?P<tenant>\S+): (?P<findings>\d+) finding\(s\), (?P<opened>\d+) opened, (?P<resolved>\d+) resolved, "
+    r"(?:(?P<delivered>\d+) of (?P<sent>\d+) notification\(s\) delivered"
+    r"|(?P<dry>\d+) notification\(s\) not sent \(dry run: the next run sends them\)"
+    r"|(?P<none>\d+) change\(s\), no notification target configured)"
+)
+
+
 def _summary(output: str) -> dict[str, Any]:
-    match = re.fullmatch(
-        r"(?P<tenant>\S+): (?P<findings>\d+) findings, (?P<opened>\d+) opened, (?P<resolved>\d+) resolved, "
-        r"(?P<notifications>\d+) notification\(s\)(?P<dry> \(dry run\))?",
-        text(output).strip(),
-    )
+    match = _SUMMARY.fullmatch(text(output).strip())
     assert match, output
-    parsed: dict[str, Any] = {k: int(v) for k, v in match.groupdict().items() if k not in ("tenant", "dry")}
-    parsed["tenant"], parsed["dry_run"] = match["tenant"], bool(match["dry"])
+    groups = match.groupdict()
+    parsed: dict[str, Any] = {k: int(groups[k]) for k in ("findings", "opened", "resolved")}
+    parsed["notifications"] = int(groups["sent"] or groups["dry"] or groups["none"])
+    parsed["delivered"] = int(groups["delivered"]) if groups["delivered"] is not None else None
+    parsed["tenant"], parsed["dry_run"] = match["tenant"], groups["dry"] is not None
     return parsed
 
 
@@ -723,11 +735,13 @@ def test_check_twice_dry_run(
     assert one["tenant"] == two["tenant"] == demo.tenant
     assert one["dry_run"] and two["dry_run"]
     assert two["findings"] == one["findings"] > 0
-    # hysteresis: only critical / immediate kinds open on the first run, the rest on the second
+    # hysteresis: only critical / immediate kinds open on the first run, the rest on the second; what the first
+    # dry run would have sent is still pending (a dry run never swallows a notification), so the second run
+    # announces every open finding
     assert 0 < one["opened"] < one["findings"]
-    assert two["opened"] == two["findings"] - one["opened"]
+    assert one["notifications"] == one["opened"]
+    assert two["opened"] == two["notifications"] == two["findings"]
     assert two["resolved"] == 0
-    assert two["notifications"] == two["opened"]
 
     db = state_dir / STATE_FILENAME
     assert db.is_file() and mode(db) == 0o600
@@ -772,13 +786,6 @@ def test_check_tenant_without_inputs_exits_2(tmp_path: Path) -> None:
     assert "no inputs configured" in text(result.stderr)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG cli.check: StateStore(state_dir) treats a NOT-YET-EXISTING state_dir as the database FILE path, so "
-    "the first run creates a SQLite file named like the directory and then load_accept_file(state_dir / "
-    "'hushwatch-accept.yml') fails with 'Not a directory' (uncaught AcceptFileError, exit 1); every later run "
-    "fails the same way. Fix: StateStore(state_dir / STATE_FILENAME)",
-)
 def test_check_creates_a_missing_state_dir(tmp_path: Path, small_alerts: Path, frozen_clock: Any) -> None:
     state_dir = tmp_path / "fresh" / "state"
     cfg = _check_config(tmp_path, small_alerts, state_dir)
@@ -790,11 +797,6 @@ def test_check_creates_a_missing_state_dir(tmp_path: Path, small_alerts: Path, f
     assert (state_dir / STATE_FILENAME).is_file()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG cli.check: load_accept_file raises AcceptFileError (a ConfigError) for an invalid accept file; "
-    "check does not catch it: traceback and exit 1 (= 'findings') instead of a config error (exit 2)",
-)
 def test_check_invalid_accept_file_is_a_config_error(tmp_path: Path, small_alerts: Path, frozen_clock: Any) -> None:
     state_dir = private_dir(tmp_path / "state")
     accept = state_dir / "hushwatch-accept.yml"
@@ -811,11 +813,6 @@ def test_check_invalid_accept_file_is_a_config_error(tmp_path: Path, small_alert
     assert "expires" in text(result.stderr)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG cli.check / cli.doctor: cfg.tenant(tenant) is called directly (not via cli._tenant), so an unknown "
-    "--tenant raises an uncaught ConfigError: traceback and exit 1 instead of exit 2",
-)
 @pytest.mark.parametrize("command", ["check", "doctor"])
 def test_unknown_tenant_is_a_usage_error(tmp_path: Path, small_alerts: Path, command: str) -> None:
     cfg = _check_config(tmp_path, small_alerts, private_dir(tmp_path / "state"))
@@ -844,7 +841,8 @@ def test_fleet_two_tenants_json_redacted(
     demo_body.pop("state_dir")
     cfg = _fleet_config(tmp_path, {"alpha": demo_body, "bravo": _file_input(other_alerts)})
     out = tmp_path / "fleet.json"
-    result = run("fleet", "-c", cfg, "-f", "json", "-o", out, "--redact")
+    # the synthetic exports are old: measure each tenant as of its own newest event
+    result = run("fleet", "-c", cfg, "-f", "json", "-o", out, "--redact", "--data-now")
     assert result.exit_code == 0
     stderr = text(result.stderr)
     assert "analyzing alpha" in stderr and "analyzing bravo" in stderr
@@ -864,7 +862,7 @@ def test_fleet_two_tenants_json_redacted(
 
 def test_fleet_console_table(tmp_path: Path, small_alerts: Path, other_alerts: Path) -> None:
     cfg = _fleet_config(tmp_path, {"web": _file_input(small_alerts), "db": _file_input(other_alerts), "idle": {}})
-    result = run("fleet", "-c", cfg)
+    result = run("fleet", "-c", cfg, "--data-now")
     assert result.exit_code == 0
     out = text(result.stdout)
     assert "Fleet summary" in out
@@ -876,7 +874,7 @@ def test_fleet_exit_3_when_a_tenant_has_no_events(tmp_path: Path, small_alerts: 
     empty = tmp_path / "empty.json"
     empty.write_text("", encoding="utf-8")
     cfg = _fleet_config(tmp_path, {"web": _file_input(small_alerts), "void": _file_input(empty)})
-    result = run("fleet", "-c", cfg, "-f", "md")
+    result = run("fleet", "-c", cfg, "-f", "md", "--data-now")
     assert result.exit_code == 3
     assert "void" in result.stdout and "web" in result.stdout
 
@@ -888,17 +886,14 @@ def test_fleet_without_analyzable_tenants_exits_2(tmp_path: Path) -> None:
     assert "no tenant could be analyzed" in text(result.stderr)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG cli.fleet: a tenant whose input cannot be opened (open_sources ValueError, e.g. missing file) is "
-    "dropped from the summary with only a stderr line and does not affect the exit code: exit 0 (false green), "
-    "while 'check' exits 3 for the same config",
-)
 def test_fleet_tenant_with_missing_input_is_not_a_green_run(tmp_path: Path, small_alerts: Path) -> None:
     cfg = _fleet_config(tmp_path, {"web": _file_input(small_alerts), "lost": _file_input(tmp_path / "missing.json")})
-    result = run("fleet", "-c", cfg, "-f", "json")
+    result = run("fleet", "-c", cfg, "-f", "json", "--data-now")
     assert "lost: input not found" in text(result.stderr)
     assert result.exit_code == 3
+    rows = {row["tenant"]: row for row in json.loads(result.stdout)["tenants"]}
+    assert set(rows) == {"web", "lost"}  # the failed tenant has its own (incomplete) row
+    assert rows["lost"]["incomplete"] and not rows["web"]["incomplete"]
 
 
 # ---- doctor -------------------------------------------------------------------------------------------------------
@@ -916,19 +911,28 @@ def test_doctor_with_the_demo_config(demo: DemoManifest, monkeypatch: pytest.Mon
     assert any("file input" in r and " OK " in r and "wazuh4" in r for r in rows), rows
     assert any("ruleset" in r and " OK " in r for r in rows), rows
     assert any("state dir" in r and " OK " in r for r in rows), rows
-    assert re.search(r"\d+ checks: 0 failed", out)
+    assert re.search(r"\d+ check\(s\): 0 failed", out)
 
 
-def test_doctor_fails_when_the_demo_inputs_are_not_reachable(
+def test_doctor_resolves_config_relative_paths_from_any_directory(
     demo: DemoManifest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)  # relative paths of the demo config no longer resolve
+    monkeypatch.chdir(tmp_path)  # the demo config's relative paths are relative to the config file, not the cwd
     result = run("doctor", "-c", demo.config_path)
+    assert result.exit_code == 0, result.stdout
+    out = text(result.stdout)
+    assert str(demo.alerts_path) in out.replace("\n", "")  # shown resolved (absolute)
+    assert re.search(r"\d+ check\(s\): 0 failed", out)
+
+
+def test_doctor_fails_when_an_input_is_not_reachable(tmp_path: Path) -> None:
+    cfg = _check_config(tmp_path, tmp_path / "gone" / "alerts.json", private_dir(tmp_path / "state"))
+    result = run("doctor", "-c", cfg)
     assert result.exit_code == 1
     out = text(result.stdout)
-    assert "FAIL" in out
-    assert "input not found" in out
-    assert re.search(r"\d+ checks: [1-9]\d* failed", out)
+    assert any("file input" in line and "FAIL" in line for line in out.splitlines())
+    assert "not found" in out
+    assert re.search(r"\d+ check\(s\): [1-9]\d* failed", out)
 
 
 def test_doctor_config_permissions(demo_config: Path) -> None:

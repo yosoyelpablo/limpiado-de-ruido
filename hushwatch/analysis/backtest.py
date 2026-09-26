@@ -13,7 +13,9 @@ It also re-checks, on the hidden events themselves, what the first-pass gates co
 * hidden events whose *actor* entities (source IPs, public destination IPs, users outside failed logons, and
   the host when the suggestion pins a host or a syslog sender) appear in a high-level alert within ± the
   co-occurrence window;
-* hidden events carrying a beacon-like public address;
+* hidden events carrying a public address with sustained hourly activity (labelled *beaconing* only for an
+  outbound destination contacted at a steady interval; a public source active for hours is a scan, brute force
+  or spray, not a beacon);
 * any actor first seen after the novelty cut-off of the window (however few alerts it has: an intruder does not
   need many), or more distinct actors than can be verified;
 * for scopes that do not pin a host (an internal source address, a syslog sender): any host first seen inside the
@@ -59,9 +61,10 @@ class BacktestWatch:
 
     high: g.HighAlertIndex | None = None
     co_window_hours: int = 24
-    beacons: Mapping[str, frozenset[str]] = field(default_factory=dict)  # rule id -> beacon-like public IPs
+    beacons: Mapping[str, frozenset[str]] = field(default_factory=dict)  # rule id -> sustained public IPs
     since: datetime | None = None  # disposition look-back start
     window: g.Window | None = None
+    periodic: Mapping[str, frozenset[str]] = field(default_factory=dict)  # rule id -> beacons (outbound, steady)
 
 
 @dataclass(slots=True)
@@ -94,8 +97,12 @@ class BacktestStats:
     last_seen: float | None = None
     co_occurring: int = 0
     co_values: list[tuple[str, str]] = field(default_factory=list)
-    beacon_hits: int = 0
+    beacon_hits: int = 0  # hidden alerts carrying a beacon (outbound public destination at a steady interval)
     beacon_values: list[str] = field(default_factory=list)
+    sustained_hits: int = 0  # hidden alerts carrying a public address with sustained, non-beacon activity
+    sustained_values: list[str] = field(default_factory=list)
+    public_sources: dict[str, int] = field(default_factory=dict)  # public SOURCE address -> hidden alerts
+    outbound: set[str] = field(default_factory=set)  # public addresses seen as destinations
     novel_actors: list[tuple[str, str, int]] = field(default_factory=list)  # (kind, value, alerts), top 5
     novel_actor_alerts: int = 0  # hidden alerts from every late actor
     actors: SpaceSaving[tuple[str, str]] = field(default_factory=lambda: SpaceSaving(ACTOR_CAPACITY))
@@ -238,9 +245,17 @@ def run_backtest(
             for item, v in extracted.values
         )
         rule_beacons = watch.beacons.get(event_rule)
-        beacons = (
+        rule_periodic = watch.periodic.get(event_rule, frozenset())
+        sustained = (
             [v for item, v in extracted.values if item.role in g.IP_ROLES and v in rule_beacons] if rule_beacons else []
         )
+        beacons = [v for v in sustained if v in rule_periodic]
+        sustained = [v for v in sustained if v not in rule_periodic]
+        sources = [
+            v
+            for item, v in extracted.values
+            if item.direction == "src" and item.role in g.IP_ROLES and ips.kind(v) == "external"
+        ]
         for _suggestion, entry, host_anchored in matched:
             entry.hidden_total += 1
             entry.per_day[day] = entry.per_day.get(day, 0) + 1
@@ -283,14 +298,26 @@ def run_backtest(
                 for value in beacons:
                     if value not in entry.beacon_values and len(entry.beacon_values) < MAX_LISTED_VALUES:
                         entry.beacon_values.append(value)
+            elif sustained:
+                entry.sustained_hits += 1
+                for value in sustained:
+                    if value not in entry.sustained_values and len(entry.sustained_values) < MAX_LISTED_VALUES:
+                        entry.sustained_values.append(value)
+            for value in sources:
+                if value in entry.public_sources:
+                    entry.public_sources[value] += 1
+                elif len(entry.public_sources) < MAX_ACTORS:
+                    entry.public_sources[value] = 1
             if entry.first_seen is None or epoch < entry.first_seen:
                 entry.first_seen = epoch
             if entry.last_seen is None or epoch > entry.last_seen:
                 entry.last_seen = epoch
             entry.examples.add(event.fields)
-            for actor, public in actor_values:
+            for actor, public, outbound in actor_values:
                 if public:
                     entry.actors.add(actor, 1, epoch, None, hour)
+                    if outbound and len(entry.outbound) < MAX_ACTORS:
+                        entry.outbound.add(actor[1])
                 table = entry.public_first if public else entry.actor_first
                 seen = table.get(actor)
                 if seen is not None:
@@ -315,23 +342,23 @@ def run_backtest(
     return stats
 
 
-def _actor_values(extracted: g.Extracted, ips: g.IpClassifier) -> list[tuple[tuple[str, str], bool]]:
-    """((kind, value), is public IP) for the actors of an event: source IPs, public destinations, users outside
-    failed logons (attempted usernames are attacker-chosen noise) and process images (a binary that never ran in
-    this scope before is new software, or malware)."""
-    out: list[tuple[tuple[str, str], bool]] = []
+def _actor_values(extracted: g.Extracted, ips: g.IpClassifier) -> list[tuple[tuple[str, str], bool, bool]]:
+    """((kind, value), is public IP, is a destination) for the actors of an event: source IPs, public
+    destinations, users outside failed logons (attempted usernames are attacker-chosen noise) and process images
+    (a binary that never ran in this scope before is new software, or malware)."""
+    out: list[tuple[tuple[str, str], bool, bool]] = []
     for item, value in extracted.values:
         if item.role in g.IP_ROLES:
             kind = ips.kind(value)
             if item.direction == "dst" and kind != "external":
                 continue
             if g.cooccurrence_kind(item, value) is not None:
-                out.append((("ip", value), kind == "external"))
+                out.append((("ip", value), kind == "external", item.direction == "dst"))
         elif item.role == g.ROLE_USER and not (extracted.failure and item.failure_sensitive):
             if g.cooccurrence_kind(item, value) is not None:
-                out.append((("user", value), False))
+                out.append((("user", value), False, False))
         elif item.role == g.ROLE_PROCESS:
-            out.append((("file", value), False))
+            out.append((("file", value), False, False))
     return out
 
 
@@ -341,12 +368,19 @@ def _inspect_actors(suggestion: Suggestion, entry: BacktestStats, novelty_limit:
     pinned = {c.value for c in suggestion.conditions}
     for actor in entry.actors.top():
         kind, value = actor.key
-        if value in pinned:
+        if value in pinned or kind != "ip" or not g.beacon_like(actor):
             continue
-        if kind == "ip" and g.beacon_like(actor) and value not in entry.beacon_values:
+        if value in entry.beacon_values or value in entry.sustained_values:
+            continue
+        periodic = value in entry.outbound and (actor.regularity() or 0.0) >= g.PERIODIC_MIN_SHARE
+        if periodic:  # outbound and steady: a beacon
             entry.beacon_hits += actor.count - actor.error
             if len(entry.beacon_values) < MAX_LISTED_VALUES:
                 entry.beacon_values.append(value)
+        else:  # a public source active for hours (scan, spray) or irregular traffic: sustained, not a beacon
+            entry.sustained_hits += actor.count - actor.error
+            if len(entry.sustained_values) < MAX_LISTED_VALUES:
+                entry.sustained_values.append(value)
     if novelty_limit is None:
         return
     # the suggestion's own anchor is skipped: its novelty was gated in pass 1
@@ -534,6 +568,14 @@ def downgrade_reasons(
                 entities=[Entity("ip", value) for value in stats.beacon_values],
             )
         )
+    if stats.sustained_hits:
+        reasons.append(
+            M(
+                "noise.backtest.sustained",
+                count=stats.sustained_hits,
+                entities=[Entity("ip", value) for value in stats.sustained_values],
+            )
+        )
     factor = tenant.noise.burst_factor if burst_factor is None else burst_factor
     span = _span(window, stats.per_day)
     if span is not None and stats.hidden_total:
@@ -567,17 +609,37 @@ def exposure_reason(stats: BacktestStats) -> Message:
 EXPOSURE_KEY = "noise.backtest.exposure"
 
 
-def summary_message(stats: BacktestStats, *, tenant: TenantConfig, days: int) -> Message:
-    """One-line description of a clean backtest."""
+def summary_message(stats: BacktestStats, *, tenant: TenantConfig, days: float) -> Message:
+    """One-line description of a clean backtest (``days``: elapsed days of the window)."""
     return M(
         "noise.backtest.clean",
         hidden=stats.hidden_total,
-        per_day=stats.hidden_total / max(1, days),
-        share=stats.share_of_rule,
+        per_day=rate(stats.hidden_total / max(1.0, days)),
+        share=pct(stats.share_of_rule),
         analyst=stats.hidden_analyst_facing,
         agents=stats.agents_affected,
         level=tenant.high_level,
     )
+
+
+def rate(per_day: float) -> Message:
+    """A per-day rate with a precision that never shows a non-zero rate as 0.0/day."""
+    if per_day <= 0:
+        return M("noise.rate.day", value=0.0)
+    if per_day < 0.01:
+        return M("noise.rate.day_tiny")
+    if per_day < 1:
+        return M("noise.rate.day_small", value=per_day)
+    return M("noise.rate.day", value=per_day)
+
+
+def pct(share: float) -> Message:
+    """A share with a precision that never shows a non-zero share as 0%."""
+    if 0 < share < 0.001:
+        return M("noise.pct_tiny")
+    if 0 < share < 0.01:
+        return M("noise.pct_small", value=share)
+    return M("noise.pct", value=share)
 
 
 def _span(window: g.Window | None, per_day: Mapping[int, int]) -> g.Window | None:
@@ -629,46 +691,56 @@ def _clip(value: Any, depth: int) -> Any:
 register(
     {
         "noise.backtest.high": {
-            "en": "Backtest: would hide {count} alert(s) at level {level} or higher",
-            "es": "Backtest: ocultaría {count} alerta(s) de nivel {level} o superior",
+            "en": "Backtest: would demote {count} alert(s) at level {level} or higher",
+            "es": "Backtest: degradaría {count} alerta(s) de nivel {level} o superior",
         },
         "noise.backtest.tp": {
-            "en": "Backtest: would hide {count} alert(s) with a true-positive disposition",
-            "es": "Backtest: ocultaría {count} alerta(s) con disposición de verdadero positivo",
+            "en": "Backtest: would demote {count} alert(s) confirmed as true positives",
+            "es": "Backtest: degradaría {count} alerta(s) confirmadas como verdaderos positivos",
         },
         "noise.backtest.co_occurrence": {
-            "en": "Backtest: {count} hidden alert(s) involve {entities}, also seen in alerts at level {level} or "
-            "higher within ±{window}",
-            "es": "Backtest: {count} alerta(s) ocultas involucran a {entities}, que también aparece(n) en alertas "
-            "de nivel {level} o superior dentro de ±{window}",
+            "en": "Backtest: {count} alert(s) it would demote involve {entities}, also seen in alerts at level "
+            "{level} or higher within ±{window}",
+            "es": "Backtest: {count} alerta(s) que degradaría involucran a {entities}, que también aparece(n) en "
+            "alertas de nivel {level} o superior dentro de ±{window}",
         },
         "noise.backtest.beacon": {
-            "en": "Backtest: {count} hidden alert(s) carry beacon-like public address(es) {entities}",
-            "es": "Backtest: {count} alerta(s) ocultas contienen direcciones públicas con patrón de beaconing "
-            "{entities}",
+            "en": "Backtest: {count} alert(s) it would demote go to {entities}, public address(es) contacted at a "
+            "steady interval, like a beacon (command and control)",
+            "es": "Backtest: {count} alerta(s) que degradaría van hacia {entities}, dirección(es) pública(s) "
+            "contactada(s) a intervalos regulares, como un beacon (comando y control)",
+        },
+        "noise.backtest.sustained": {
+            "en": "Backtest: {count} alert(s) it would demote involve {entities}, public address(es) active for "
+            "many hours (a scan, brute force or spray from the Internet, or sustained traffic to it)",
+            "es": "Backtest: {count} alerta(s) que degradaría involucran a {entities}, dirección(es) pública(s) "
+            "activa(s) durante muchas horas (un escaneo, fuerza bruta o spray desde Internet, o tráfico sostenido "
+            "hacia Internet)",
         },
         "noise.backtest.novel_actor": {
-            "en": "Backtest: {count} hidden alert(s) come from {entities}, first seen late in the window: new "
-            "actors inside the scope are investigated, not tuned",
-            "es": "Backtest: {count} alerta(s) ocultas provienen de {entities}, vistos por primera vez al final de "
-            "la ventana: los actores nuevos dentro del alcance se investigan, no se ajustan",
+            "en": "Backtest: {count} alert(s) it would demote come from {entities}, first seen late in the window: "
+            "new actors inside the scope are investigated, not tuned",
+            "es": "Backtest: {count} alerta(s) que degradaría provienen de {entities}, vistos por primera vez al "
+            "final de la ventana: los actores nuevos dentro del alcance se investigan, no se ajustan",
         },
         "noise.backtest.unknown_level": {
-            "en": "Backtest: would hide {count} alert(s) whose level is unknown (they may be level {level} or higher)",
-            "es": "Backtest: ocultaría {count} alerta(s) de nivel desconocido (podrían ser de nivel {level} o "
+            "en": "Backtest: would demote {count} alert(s) whose level is unknown (they may be level {level} or "
+            "higher)",
+            "es": "Backtest: degradaría {count} alerta(s) de nivel desconocido (podrían ser de nivel {level} o "
             "superior)",
         },
         "noise.backtest.actors_truncated": {
-            "en": "Backtest: the scope holds more than {max} distinct actors, so new actors hidden inside it cannot "
-            "be ruled out",
+            "en": "Backtest: the scope holds more than {max} distinct actors, so new actors inside it cannot be "
+            "ruled out",
             "es": "Backtest: el alcance contiene más de {max} actores distintos, así que no se pueden descartar "
-            "actores nuevos ocultos dentro de él",
+            "actores nuevos dentro de él",
         },
         "noise.backtest.novel_host": {
-            "en": "Backtest: {count} hidden alert(s) are on {entities}, first seen in this scope late in the window: "
-            "a known identity reaching a new host is investigated, not tuned",
-            "es": "Backtest: {count} alerta(s) ocultas están en {entities}, vistos por primera vez en este alcance "
-            "al final de la ventana: una identidad conocida que llega a un equipo nuevo se investiga, no se ajusta",
+            "en": "Backtest: {count} alert(s) it would demote are on {entities}, first seen in this scope late in "
+            "the window: a known identity reaching a new host is investigated, not tuned",
+            "es": "Backtest: {count} alerta(s) que degradaría están en {entities}, vistos por primera vez en este "
+            "alcance al final de la ventana: una identidad conocida que llega a un equipo nuevo se investiga, no se "
+            "ajusta",
         },
         "noise.backtest.hosts_truncated": {
             "en": "Backtest: the scope reaches more than {max} hosts, so new hosts inside it cannot be ruled out",
@@ -676,28 +748,33 @@ register(
             "dentro de él",
         },
         "noise.backtest.exposure": {
-            "en": "Backtest: {count} of the {total} hidden alerts ({share:.0%}, limit {min:.0%}) come from public "
-            "addresses: restrict the exposure at the source instead of muting",
-            "es": "Backtest: {count} de las {total} alertas ocultas ({share:.0%}, límite {min:.0%}) provienen de "
-            "direcciones públicas: restrinja la exposición en el origen en lugar de silenciarlas",
+            "en": "Backtest: {count} of the {total} alerts it would demote ({share:.0%}, limit {min:.0%}) come from "
+            "public addresses: restrict the exposure at the source instead of muting",
+            "es": "Backtest: {count} de las {total} alertas que degradaría ({share:.0%}, límite {min:.0%}) provienen "
+            "de direcciones públicas: restrinja la exposición en el origen en lugar de silenciarlas",
         },
         "noise.backtest.burst": {
-            "en": "Backtest: {peak} hidden alerts on {day}, {factor:.1f}× the median of {median:.1f} per day "
-            "(limit {limit:.1f}×)",
-            "es": "Backtest: {peak} alertas ocultas el {day}, {factor:.1f}× la mediana de {median:.1f} por día "
-            "(límite {limit:.1f}×)",
+            "en": "Backtest: {peak} alerts it would demote on {day}, {factor:.1f}× the median of {median:.1f} per "
+            "day (limit {limit:.1f}×)",
+            "es": "Backtest: {peak} alertas que degradaría el {day}, {factor:.1f}× la mediana de {median:.1f} por "
+            "día (límite {limit:.1f}×)",
         },
         "noise.backtest.clean": {
-            "en": "Backtest: would hide {hidden} alerts ({per_day:.1f}/day, {share:.0%} of the rule; {analyst} "
-            "analyst-facing) on {agents} agent(s); none at level {level} or higher and no true positives",
-            "es": "Backtest: ocultaría {hidden} alertas ({per_day:.1f}/día, {share:.0%} de la regla; {analyst} "
-            "visibles para analistas) en {agents} agente(s); ninguna de nivel {level} o superior y ningún "
-            "verdadero positivo",
+            "en": "Backtest: would demote {hidden} alerts ({per_day}, {share} of the rule; {analyst} analyst-facing) "
+            "on {agents} agent(s); none at level {level} or higher and no true positives",
+            "es": "Backtest: degradaría {hidden} alertas ({per_day}, {share} de la regla; {analyst} visibles para "
+            "analistas) en {agents} agente(s); ninguna de nivel {level} o superior y ningún verdadero positivo",
         },
         "noise.backtest.empty": {
             "en": "Backtest: the condition matched no alert on the second pass (the input changed?); nothing to tune",
             "es": "Backtest: la condición no coincidió con ninguna alerta en la segunda pasada (¿cambió la "
             "entrada?); no hay nada que ajustar",
         },
+        "noise.rate.day": {"en": "{value:.1f}/day", "es": "{value:.1f}/día"},
+        "noise.rate.day_small": {"en": "{value:.2f}/day", "es": "{value:.2f}/día"},
+        "noise.rate.day_tiny": {"en": "<0.01/day", "es": "<0,01/día"},
+        "noise.pct": {"en": "{value:.0%}", "es": "{value:.0%}"},
+        "noise.pct_small": {"en": "{value:.1%}", "es": "{value:.1%}"},
+        "noise.pct_tiny": {"en": "<0.1%", "es": "<0,1%"},
     }
 )

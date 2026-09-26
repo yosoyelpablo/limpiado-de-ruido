@@ -1,5 +1,8 @@
 # hushwatch example configuration.
 # Secrets are ALWAYS referenced as ${ENV_VAR}; never write them here. chmod 600 this file anyway.
+# An unset variable only blocks the tenant that uses it (`hushwatch doctor` lists each one with its `export` line).
+# Relative paths (inputs[].path, ruleset_dirs, dispositions, agents_file, state_dir, ca_cert) are relative to THIS
+# file's directory, not to the directory hushwatch is started from.
 
 defaults:
   timezone: America/Argentina/Buenos_Aires   # IANA name; used for hour-of-day baselines (DST-safe)
@@ -22,6 +25,8 @@ defaults:
     - {start: 2026-12-24, end: 2026-12-26, reason: holidays}
   noise:
     minutes_per_alert: [1, 5]
+    min_noisy_alerts: 50   # a rule is only called noisy with at least this many alerts...
+    min_noisy_per_day: 5   # ...and this many per day
   silence:
     baseline: 14d
     alarm_budget: 0.05     # expected false silence alarms per run, across all sources
@@ -31,7 +36,8 @@ tenants:
     inputs:
       - type: file
         path: /var/ossec/logs/alerts/alerts.json
-    ruleset_dirs: [/var/ossec/ruleset/rules, /var/ossec/etc/rules]
+    ruleset_dirs: [/var/ossec/ruleset/rules, /var/ossec/etc/rules]   # stock AND local rules
+    # dispositions: verdicts.csv            # alert verdicts (tp / fp / btp...) that veto or support tuning
     wazuh_api:
       url: https://wazuh-manager.acme.example:55000
       username: ${ACME_WAZUH_API_USER}
@@ -50,6 +56,9 @@ tenants:
         username: ${GLOBEX_INDEXER_USER}
         password: ${GLOBEX_INDEXER_PASSWORD}
         ca_cert: /etc/hushwatch/globex-root-ca.pem
+    # no API access from here: an exported agent list (JSON of the Wazuh API GET /agents) enables the agent
+    # connectivity checks (disconnected agents, agents alive but sending nothing)
+    # agents_file: globex-agents.json
     notify:
       - type: slack
         url: ${GLOBEX_SLACK_WEBHOOK}

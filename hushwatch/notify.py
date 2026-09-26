@@ -58,14 +58,14 @@ register(
         "notify.count.opened": {"en": "opened: {n}", "es": "abiertos: {n}"},
         "notify.count.regressed": {"en": "regressed: {n}", "es": "reabiertos: {n}"},
         "notify.count.escalated": {"en": "more severe: {n}", "es": "más graves: {n}"},
-        "notify.count.acceptance_expired": {"en": "acceptances expired: {n}", "es": "aceptaciones caducadas: {n}"},
+        "notify.count.acceptance_expired": {"en": "acceptances expired: {n}", "es": "aceptaciones vencidas: {n}"},
         "notify.count.flapping": {"en": "flapping: {n}", "es": "intermitentes: {n}"},
         "notify.count.reminder": {"en": "still open: {n}", "es": "siguen abiertos: {n}"},
         "notify.count.resolved": {"en": "resolved: {n}", "es": "resueltos: {n}"},
         "notify.type.opened": {"en": "Opened", "es": "Abierto"},
         "notify.type.regressed": {"en": "Regressed", "es": "Reabierto"},
         "notify.type.escalated": {"en": "More severe", "es": "Más grave"},
-        "notify.type.acceptance_expired": {"en": "Acceptance expired", "es": "Aceptación caducada"},
+        "notify.type.acceptance_expired": {"en": "Acceptance expired", "es": "Aceptación vencida"},
         "notify.type.flapping": {"en": "Flapping", "es": "Intermitente"},
         "notify.type.reminder": {"en": "Still open", "es": "Sigue abierto"},
         "notify.type.resolved": {"en": "Resolved", "es": "Resuelto"},
@@ -88,6 +88,10 @@ register(
         "notify.heartbeat.ok": {
             "en": "hushwatch · {tenant}: run completed ({at})",
             "es": "hushwatch · {tenant}: ejecución completada ({at})",
+        },
+        "notify.heartbeat.critical": {
+            "en": "hushwatch · {tenant}: run completed ({at}); {n} critical finding(s) open",
+            "es": "hushwatch · {tenant}: ejecución completada ({at}); {n} hallazgo(s) crítico(s) abierto(s)",
         },
         "notify.heartbeat.fail": {
             "en": "hushwatch · {tenant}: run FAILED or incomplete ({at})",
@@ -251,13 +255,21 @@ def build_heartbeat(
 ) -> dict[str, Any]:
     """Build the heartbeat payload sent after every run (a dead-man switch for the cron job itself).
 
+    ``ok`` says whether the run itself worked. ``status`` is ``fail`` for a failed/incomplete run, ``critical``
+    when the run worked but critical findings are open (``counts["open.critical"]``), else ``ok``: a monitor
+    watching only the heartbeat never reads "all good" while a critical problem is open.
     URLs in ``detail`` are always cut to ``scheme://host`` (their user info, path and query may be secrets)."""
     lang = lang if lang in LANGS else "en"
     fmt, scrub = _entity_policy(include_entities, redactor, list(iter_entities(detail)))
     text = render(detail, lang, fmt) if isinstance(detail, Message) else str(detail)
     text = _url_origins(text[: _DETAIL_LIMIT * 4])  # an error detail may quote a URL with credentials or a token
     at = iso(now.astimezone(UTC)) if now.tzinfo is not None else iso(now.replace(tzinfo=UTC))
-    key = "notify.heartbeat.ok" if ok else "notify.heartbeat.fail"
+    clean_counts = {str(k): int(v) for k, v in (counts or {}).items() if isinstance(v, int)}
+    critical = max(0, clean_counts.get("open.critical", 0))
+    status = "fail" if not ok else ("critical" if critical else "ok")
+    key = {"ok": "notify.heartbeat.ok", "critical": "notify.heartbeat.critical", "fail": "notify.heartbeat.fail"}[
+        status
+    ]
     return {
         "schema_version": NOTIFY_SCHEMA_VERSION,
         "type": "heartbeat",
@@ -266,12 +278,12 @@ def build_heartbeat(
         "run_id": run_id,
         "at": at,
         "ok": bool(ok),
-        "status": "ok" if ok else "fail",
+        "status": status,
         "lang": lang,
         "include_entities": bool(include_entities),
-        "summary": _clean(render(M(key, tenant=tenant, at=at or ""), lang), _TITLE_LIMIT),
+        "summary": _clean(render(M(key, tenant=tenant, at=at or "", n=critical), lang), _TITLE_LIMIT),
         "detail": _bounded(text, scrub, _DETAIL_LIMIT) if text else "",
-        "counts": {str(k): int(v) for k, v in (counts or {}).items() if isinstance(v, int)},
+        "counts": clean_counts,
     }
 
 
@@ -870,7 +882,7 @@ def _failure(
     message: Message, target: str, fingerprints: tuple[str, ...] = (), status: int | None = None
 ) -> SendResult:
     text = render(message, "en")
-    log.warning("notify: %s", text)
+    log.debug("notify: %s", text)  # the caller reports failures once (the CLI prints one line per failure)
     return SendResult(
         ok=False, sent=False, status_code=status, target=target, error=text, message=message, fingerprints=fingerprints
     )

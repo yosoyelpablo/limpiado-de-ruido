@@ -48,7 +48,8 @@ Después apuntalo a tus datos:
 
 ```bash
 # Manager de Wazuh (lectura de las alertas; ejecutalo como miembro del grupo 'wazuh', no como root)
-hushwatch report /var/ossec/logs/alerts/alerts.json --ruleset /var/ossec/etc/rules --lang es -f html -o informe.html
+hushwatch report /var/ossec/logs/alerts/alerts.json \
+  --ruleset /var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules --lang es -f html -o informe.html
 
 # Reporte seudonimizado para compartir con un cliente o un proveedor
 hushwatch report alerts.json --lang es --redact -f html -o informe-compartible.html
@@ -58,7 +59,7 @@ hushwatch report alerts.json --lang es --redact -f html -o informe-compartible.h
 
 | Dominio | Qué obtenés | Ejemplo |
 |---|---|---|
-| **Ruido** | Sugerencias de ajuste acotadas, con controles y backtest, más reglas de Wazuh listas para revisar | *"Regla 60106 en srv-backup-01 para `svc_backup` = 34% de la regla, todas las noches durante 21 días. Ocultarla saca 157 alertas por día y ninguna alerta de severidad alta."* |
+| **Ruido** | Sugerencias de ajuste acotadas, con controles y backtest, más reglas de Wazuh listas para revisar | *"Regla 5710 desde el escáner interno 10.20.0.15 = 52% de la regla, todas las noches durante 21 días. Bajarle el nivel saca ~200 alertas por día de la vista del analista y no oculta ninguna alerta de severidad alta — requiere revisión: la regla de fuerza bruta 5712 cuenta estos eventos."* |
 | | Reglas ruidosas que **no** hay que ajustar, y por qué | *"5710 desde 203.0.113.50: vista por primera vez hace 2 días, coincide con la regla de fuerza bruta 5712 (nivel 10) → investigar, o restringir la exposición."* |
 | **Silencio** | Fuentes, canales y reglas que se callaron: calibrado y agrupado por causa raíz | *"dc02 dejó de enviar hace 30 h, 20 min después de 'se borró el log de auditoría' (1102) → posible evasión de defensas (T1070.001)."* |
 | | Campos que desaparecieron | *"fw-edge-01 perdió `data.dstport` el 2026-09-20 (100% → 0%): toda regla que lo use quedó ciega."* |
@@ -82,8 +83,9 @@ hushwatch report alerts.json --lang es --redact -f html -o informe-compartible.h
   * verdaderos positivos confirmados.
 * Cada sugerencia pasa por un **backtest**: se reproduce sobre toda la ventana con la misma semántica que la regla
   generada, y se degrada si ocultaría cualquier alerta de nivel alto o un verdadero positivo confirmado.
-* Las reglas de Wazuh generadas **bajan el nivel** de la alerta (no la descartan, así que sigue siendo buscable),
-  usan patrones PCRE2 anclados y totalmente escapados, y vencen. Si otras reglas de correlación dependen de la regla
+* Las reglas de Wazuh generadas **bajan el nivel** de la alerta (no la descartan, así que sigue siendo buscable) y
+  usan patrones PCRE2 anclados y totalmente escapados. Wazuh no tiene vencimiento de reglas: cada regla lleva su
+  fecha de vencimiento en la descripción y `hushwatch audit` informa las vencidas. Si otras reglas de correlación dependen de la regla
   ajustada (por ejemplo, una regla de frecuencia de fuerza bruta), o si se adelantaría a una regla hermana, la
   sugerencia queda marcada **REQUIERE REVISIÓN** con la lista exacta de reglas afectadas. Cada archivo trae un
   checklist de validación (`wazuh-analysisd -t`, `wazuh-logtest`, rollback).
@@ -130,13 +132,18 @@ simplemente se apagan de noche:
 | `hushwatch report [ENTRADAS]` | Todo: ruido, silencio, cobertura, pipeline, deuda de tuning |
 | `hushwatch noise [ENTRADAS]` | Solo análisis de ajustes (`--emit-suppressions DIR` escribe reglas de Wazuh) |
 | `hushwatch silence [ENTRADAS]` | Solo silencio, cobertura y salud del pipeline |
-| `hushwatch audit DIR_REGLAS` | Audita las supresiones de Wazuh existentes |
+| `hushwatch audit DIRS_REGLAS...` | Audita las supresiones de Wazuh existentes (pase también el ruleset de fábrica para verificar las correlaciones) |
 | `hushwatch check` | Modo cron: ciclo de vida de hallazgos (nuevo / abierto / resuelto / reabierto / intermitente), avisa solo ante cambios, envía heartbeats |
 | `hushwatch fleet` | Vista MSSP: todos los clientes lado a lado |
 | `hushwatch doctor` | Diagnostica configuración, archivos, indexer, API de Wazuh y TLS, con la solución exacta |
 
 Opciones comunes: `-f console|html|md|json`, `-o ARCHIVO`, `--lang en|es`, `--redact`, `--fail-on SEVERIDAD`,
-`--since 21d`, `--dispositions veredictos.csv`, `--ruleset DIR`, `-c config.yml -t cliente`.
+`--since 21d`, `--now ISO`, `--dispositions veredictos.csv`, `--ruleset DIR` (repetible), `--agents agentes.json`,
+`--force`, `-c config.yml -t cliente`.
+
+> **Consejo:** pase siempre el ruleset de fábrica (`/var/ossec/ruleset/rules`) junto con sus reglas locales. Sin él,
+> hushwatch no puede ver qué reglas de correlación dependen de una regla ruidosa, así que marca todas las
+> sugerencias como REQUIERE REVISIÓN y el análisis queda como incompleto.
 
 **Códigos de salida:**
 * `0`: sin problemas;

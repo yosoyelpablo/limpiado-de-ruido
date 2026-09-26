@@ -36,6 +36,7 @@ import heapq
 import io
 import json
 import math
+import os
 import random
 import time
 from collections import deque
@@ -107,6 +108,11 @@ register(
             "en": "Internal vulnerability scanner {ip} triggering sshd invalid-user alerts on the web servers",
             "es": "El escáner de vulnerabilidades interno {ip} dispara alertas de usuario inexistente de sshd en "
             "los servidores web",
+        },
+        "demo.scenario.noise.scanner_long_urls": {
+            "en": "Internal vulnerability scanner {ip} sending over-long URLs to the web servers every night",
+            "es": "El escáner de vulnerabilidades interno {ip} envía URL demasiado largas a los servidores web cada "
+            "noche",
         },
         "demo.scenario.noise.fim_app_logs": {
             "en": "File integrity monitoring of constantly changing application logs ({path}) on the database servers",
@@ -533,6 +539,17 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` readable by the owner only (0600), also when the file already exists; a symlink
+    in its place is refused (O_NOFOLLOW) rather than followed."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # an existing file keeps its old mode otherwise
+        handle.write(text)
+
+
 def _ms(ts: datetime) -> int:
     return int(ts.timestamp()) * 1000 + ts.microsecond // 1000
 
@@ -811,6 +828,14 @@ _RULE_FILES: dict[str, str] = {
       <id>T1190</id>
     </mitre>
     <group>attack,sql_injection,gdpr_IV_35.7.d,nist_800_53_SA.11,nist_800_53_SI.4,pci_dss_6.5,pci_dss_11.4,pci_dss_6.5.1,tsc_CC6.6,tsc_CC7.1,tsc_CC8.1,tsc_CC6.1,tsc_CC6.8,tsc_CC7.2,tsc_CC7.3,</group>
+  </rule>
+  <rule id="31115" level="7" maxsize="2048">
+    <if_sid>31100</if_sid>
+    <description>URL too long. Higher than allowed on most browsers. Possible attack.</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>invalid_access,gdpr_IV_35.7.d,nist_800_53_SA.11,nist_800_53_SI.4,pci_dss_6.5,pci_dss_11.4,tsc_CC6.6,tsc_CC7.1,tsc_CC8.1,tsc_CC6.1,tsc_CC6.8,tsc_CC7.2,tsc_CC7.3,</group>
   </rule>
   <rule id="31106" level="12">
     <if_sid>31103</if_sid>
@@ -2151,6 +2176,14 @@ _WEB_PATHS = (
     "/login?next=%2Fdashboard",
     "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
 )
+# over-long URL checks of the vulnerability scanner (buffer-overflow probes): path prefix, padded at run time
+_SCANNER_URLS = (
+    "/index.php?page=",
+    "/cgi-bin/test.cgi?q=",
+    "/login?next=",
+    "/api/v2/search?q=",
+    "/static/",
+)
 _PROBE_PATHS = (
     "/api/v2/items?id=",
     "/api/v2/export?format=",
@@ -2541,9 +2574,11 @@ class _BackupJob(_Planned):
 
 
 class _Scanner(_Planned):
-    """Scenario b: the trusted internal scanner checks default accounts over ssh on every web server nightly.
+    """Scenarios b and u: the trusted internal scanner checks every web server nightly.
 
-    Attempts are >= 20 s apart, so the 5712 frequency rule (8 in 120 s) never fires for the scanner.
+    b: default accounts over ssh (5710). Attempts are >= 20 s apart, so the 5712 frequency rule (8 in 120 s) never
+    fires for the scanner. u: over-long URLs against the web application (31115, level 7, no correlation rule
+    depends on it); the servers answer 414, so no web attack ever "succeeds" (31106).
     """
 
     def __init__(self, world: _World) -> None:
@@ -2553,13 +2588,22 @@ class _Scanner(_Planned):
             ms = self.local_ms(day, 2, 0) + self.rng.randrange(300_000)
             for web in webs:
                 for i in range(self.rng.randint(28, 42)):
-                    self.plan.append((ms, (web, _SCANNER_USERS[i % len(_SCANNER_USERS)])))
+                    self.plan.append((ms, ("ssh", web, _SCANNER_USERS[i % len(_SCANNER_USERS)])))
                     ms += self.rng.randrange(20_000, 45_000)
+                ms += self.rng.randrange(60_000, 120_000)
+                for i in range(self.rng.randint(8, 14)):
+                    self.plan.append((ms, ("url", web, _SCANNER_URLS[i % len(_SCANNER_URLS)])))
+                    ms += self.rng.randrange(15_000, 40_000)
                 ms += self.rng.randrange(120_000, 300_000)
 
     def make(self, ms: int, item: Any) -> None:
-        web, user = item
-        self.push(ms, "5710", web, _sshd_invalid(web, ms, self.rng, user, SCANNER_IP), ("b",))
+        what, web, value = item
+        if what == "ssh":
+            self.push(ms, "5710", web, _sshd_invalid(web, ms, self.rng, value, SCANNER_IP), ("b",))
+            return
+        url = value + "A" * self.rng.randrange(2100, 2400)  # longer than any browser sends (2083)
+        body = _web(web, ms, SCANNER_IP, "GET", url, 414, 173, "Mozilla/5.0 (compatible; VulnScanner/9.4; +scan)")
+        self.push(ms, "31115", web, body, ("u",))
 
 
 class _BruteForce(_Planned):
@@ -2873,7 +2917,7 @@ class _Stats:
         self.hosts: dict[str, list[int]] = {}
         self.codes: dict[tuple[str, str], set[str]] = {}  # (host, channel) -> Windows event IDs
         self.fw_fields = [0, 0, 0, 0]  # before: events, with dstport; after: events, with dstport
-        self.pool: dict[str, list[tuple[int, str, str]]] = {"a": [], "b": [], "e": []}
+        self.pool: dict[str, list[tuple[int, str, str]]] = {"a": [], "b": [], "e": [], "u": []}
         self.laptop_off_hours = 0
         self.spray_users: set[str] = set()
         self.high_alerts: dict[str, list[int]] = {}  # rule id (level >= 10) -> timestamps (small: capped)
@@ -3090,12 +3134,13 @@ _DISPOSITION_COLUMNS = ("alert_id", "rule_id", "field", "value", "verdict", "clo
 
 
 def _write_dispositions(path: Path, world: _World, stats: _Stats) -> dict[str, dict[str, int]]:
-    """Analyst verdicts: FP/BTP on the benign candidates (a, b), a TP scope on the spray (e), a few untriaged."""
+    """Analyst verdicts: FP/BTP on the benign candidates (a, b, u), a TP scope on the spray (e), a few untriaged."""
     rows: list[tuple[int, list[str]]] = []
     summary: dict[str, dict[str, int]] = {}
     plans = (
         ("a", ("btp", "btp", "fp"), "Nightly backup job of svc_backup (CHG-0101)"),
         ("b", ("fp", "btp"), "Authorized nightly vulnerability scan from the internal scanner"),
+        ("u", ("btp", "fp"), "Authorized nightly vulnerability scan (over-long URL checks, CHG-0107)"),
     )
     for tag, verdicts, comment in plans:
         # analysts close alerts some time after they fire: only alerts older than two hours are dispositioned
@@ -3164,11 +3209,11 @@ def _write_dispositions(path: Path, world: _World, stats: _Stats) -> dict[str, d
 def _config_text(world: _World) -> str:
     holiday = world.holiday.isoformat()
     return f"""# hushwatch demo tenant, written by `hushwatch demo` (synthetic data only; safe to share).
-# File paths are relative: run hushwatch from this directory (`hushwatch demo` passes absolute paths itself).
+# Relative file paths are resolved against the directory of this file.
 tenants:
   {TENANT_NAME}:
     timezone: {TIMEZONE}
-    triage_level: 7
+    triage_level: 5
     high_level: 10
     max_tunable_level: 9
     internal_networks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
@@ -3319,9 +3364,11 @@ def _ground_truth(world: _World, stats: _Stats, dispositions: Mapping[str, Mappi
             key="noise.svc_backup_logons",
             category="noise_safe",
             title="Nightly svc_backup logons on srv-backup-01: benign scheduled automation",
-            expected_kinds=("noise.tune",),
-            expected_verdict="tune",
-            allowed_verdicts=("tune",),
+            # rule 60106 is level 3: below the triage level and already at the demote level, so no analyst would
+            # see less by tuning it; it is reported as index volume (verdict "watch"), never as a tuning candidate
+            expected_kinds=("noise.index_volume",),
+            expected_verdict="watch",
+            allowed_verdicts=("watch", "tune"),
             review_required=False,
             rule_ids=("60106",),
             conditions=(("agent.name", "srv-backup-01"), ("data.win.eventdata.targetUserName", "svc_backup")),
@@ -3334,6 +3381,8 @@ def _ground_truth(world: _World, stats: _Stats, dispositions: Mapping[str, Mappi
                 "trusted_entity": "user: svc_backup",
                 "dispositions": dict(dispositions.get("a", {})),
                 "high_level_alerts_on_host": 0,
+                "rule_level": 3,
+                "impact": "index volume only (below the triage level, already at the demote level)",
             },
             **t.span("a"),
         ),
@@ -3360,6 +3409,30 @@ def _ground_truth(world: _World, stats: _Stats, dispositions: Mapping[str, Mappi
                 "dispositions": dict(dispositions.get("b", {})),
             },
             **t.span("b"),
+        ),
+        PlantedScenario(
+            id="u",
+            key="noise.scanner_long_urls",
+            category="noise_safe",
+            title="Internal vulnerability scanner 10.20.0.15 sending over-long URLs to the web servers every night",
+            expected_kinds=("noise.tune",),
+            expected_verdict="tune",
+            allowed_verdicts=("tune",),
+            review_required=False,
+            rule_ids=("31115",),
+            conditions=(("data.srcip", SCANNER_IP),),
+            log_source="/var/log/nginx/access.log",
+            entities=(("ip", "ip", SCANNER_IP),),
+            details={
+                "agents": t.names("web"),
+                "schedule": "every night from 02:00 local time, right after the ssh checks; the servers answer 414",
+                "share_of_rule": t.share("u", "31115"),
+                "rule_level": 7,
+                "dependents": [],
+                "trusted_entity": f"data.srcip: {SCANNER_IP}",
+                "dispositions": dict(dispositions.get("u", {})),
+            },
+            **t.span("u"),
         ),
         PlantedScenario(
             id="c",
@@ -3536,7 +3609,8 @@ def _ground_truth(world: _World, stats: _Stats, dispositions: Mapping[str, Mappi
                 "silent_hours": 30,
                 "tier": "critical",
                 "severity": "critical",
-                "also_expected": ["pipeline.agent_no_data"],
+                # one incident, one finding: the tampering finding folds these in (listed as related, not repeated)
+                "explains": ["pipeline.agent_no_data", "silence.unmonitorable"],
                 "api_status": "active (fresh keepalive)",
                 "mitre": ["T1070.001", "T1562.002"],
             },
@@ -3809,7 +3883,7 @@ def generate(
     dispositions_path = out / DISPOSITIONS_FILE
     disposition_summary = _write_dispositions(dispositions_path, world, stats)
     config_path = out / CONFIG_FILE
-    config_path.write_text(_config_text(world), encoding="utf-8")
+    _write_private(config_path, _config_text(world))  # configs can hold credentials: 0600, like doctor expects
     manifest = DemoManifest(
         out_dir=out,
         alerts_path=alerts_path,

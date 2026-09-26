@@ -96,23 +96,25 @@ def golden_suggestions() -> list[Suggestion]:
             ],
         ),
         sug(
-            "60106",
+            "60122",
             ("agent.name", "dc01"),
             ("data.win.eventdata.targetUserName", "svc_backup"),
             fingerprint="a1b2c3d4e5f607182930",
         ),
         sug(
-            "5501",
+            "5503",
             ("predecoder.hostname", "srv-backup-01.example"),
             ("data.dstuser", "svc_backup"),
             fingerprint="b2c3d4e5f60718293041",
         ),
         sug(
-            "60106",
+            "60122",
             ("location", "EventChannel"),
             ("data.win.eventdata.image", "C:\\\\Program Files\\\\Veeam\\\\agent.exe"),
             fingerprint="c3d4e5f6071829304152",
         ),
+        # 60106 is level 3 already: a level-3 child would change nothing, so it is never written
+        sug("60106", ("agent.name", "dc01"), fingerprint="d4e5f607182930415263"),
     ]
 
 
@@ -126,7 +128,8 @@ def test_golden_output(tmp_path: Path, rs: Ruleset) -> None:
         (100007, "b2c3d4e5f60718293041"),
         (100008, "c3d4e5f6071829304152"),
     ]
-    assert result.review_required == [100000]
+    assert result.review_required == [100000, 100004, 100007, 100008]  # every parent feeds a correlation rule
+    assert [(fp, m.key) for fp, m in result.skipped] == [("d4e5f607182930415263", "wazuh.emit.skip.not_lower")]
     assert [p.name for p in result.paths] == [XML_FILE, SPEC_FILE, VALIDATION_FILE, SAMPLES_FILE]
 
 
@@ -152,7 +155,10 @@ def test_emitted_file_loads_cleanly_with_the_ruleset(tmp_path: Path, rs: Ruleset
     assert "100000" in combined.children("5710")
     audit = audit_ruleset(combined, tenant=_tenant(), now=NOW)
     flagged = {f.evidence.get("rule_id") for f in audit.findings if f.kind == "tuning.risky_suppression"}
-    assert "100004" not in flagged and "100007" not in flagged and "100008" not in flagged  # level not lowered
+    # every emitted child really demotes a parent that feeds correlation: the audit agrees with REVIEW REQUIRED
+    assert {str(rule_id) for rule_id in result.review_required} <= flagged
+    finding = next(f for f in audit.findings if f.evidence.get("rule_id") == "100000")
+    assert "breaks_correlation" in finding.evidence["checks"]
 
 
 def _tenant() -> Any:
@@ -410,7 +416,7 @@ def test_shared_directory_warns(tmp_path: Path, rs: Ruleset) -> None:
 
 def only_condition(result: emitter.EmitResult) -> ET.Element:
     rule = rules_of(result)[0]
-    conditions = [c for c in rule if c.tag not in ("if_sid", "description", "group")]
+    conditions = [c for c in rule if c.tag not in ("if_sid", "description", "group", "mitre", "options")]
     assert len(conditions) == 1
     return conditions[0]
 
@@ -604,9 +610,9 @@ def test_non_string_values_are_refused(tmp_path: Path, rs: Ruleset) -> None:
 
 
 def test_rule_wide_needs_explicit_flag(tmp_path: Path, rs: Ruleset) -> None:
-    result = emit(tmp_path, [sug("5502")], rs)
+    result = emit(tmp_path, [sug("5760")], rs)
     assert result.skipped[0][1].key == "wazuh.emit.skip.rule_wide"
-    allowed = emit(tmp_path / "b", [sug("5502")], rs, allow_rule_wide=True)
+    allowed = emit(tmp_path / "b", [sug("5760")], rs, allow_rule_wide=True)
     rule = rules_of(allowed)[0]
     assert [c.tag for c in rule] == ["if_sid", "description", "group"]
     assert "for all events" in (rule.findtext("description") or "")
@@ -999,11 +1005,11 @@ def test_injection_fuzz(tmp_path: Path, rs: Ruleset) -> None:
     suggestions = []
     for t_index, (field, _) in enumerate(TARGETS):
         for v_index, value in enumerate(HOSTILE):
-            suggestions.append(sug("5501", (field, value), fingerprint=f"f{t_index}v{v_index}"))
+            suggestions.append(sug("5760", (field, value), fingerprint=f"f{t_index}v{v_index}"))
     result = emit(tmp_path, suggestions, rs)
     text = result.paths[0].read_text(encoding="utf-8")
 
-    # 1. Well-formed XML with exactly the intended rules, all children of 5501, at level 3.
+    # 1. Well-formed XML with exactly the intended rules, all children of 5760, at level 3.
     elements = rules_of(result)
     emitted = {fp for _, fp in result.rules}
     skipped = {fp: message.key for fp, message in result.skipped}
@@ -1012,7 +1018,7 @@ def test_injection_fuzz(tmp_path: Path, rs: Ruleset) -> None:
     assert set(skipped.values()) == {"wazuh.emit.skip.too_long"}
     assert {fp for fp in skipped} == {f"f{t}v{len(HOSTILE) - 1}" for t in range(len(TARGETS))}
     assert [int(e.get("id", "0")) for e in elements] == [rule_id for rule_id, _ in result.rules]
-    assert all(e.findtext("if_sid") == "5501" and e.get("level") == "3" for e in elements)
+    assert all(e.findtext("if_sid") == "5760" and e.get("level") == "3" for e in elements)
     assert "100999" not in {e.get("id") for e in elements}
     by_fp = {s.fingerprint: s for s in suggestions}
     tags = dict(TARGETS)
@@ -1081,7 +1087,7 @@ def test_pcre2_escape_random_strings_roundtrip() -> None:
 def test_windows_backslash_doubling(tmp_path: Path, rs: Ruleset) -> None:
     doubled = "C:\\\\Windows\\\\System32\\\\svchost.exe"  # how eventchannel values arrive
     single = "C:\\Windows\\System32\\svchost.exe"
-    result = emit(tmp_path, [sug("60106", ("data.win.eventdata.image", doubled))], rs)
+    result = emit(tmp_path, [sug("60122", ("data.win.eventdata.image", doubled))], rs)
     pattern = only_condition(result).text or ""
     assert pattern == "^C\\x{3a}(?:\\x{5c})+Windows(?:\\x{5c})+System32(?:\\x{5c})+svchost\\x{2e}exe\\z"
     assert matches(pattern, doubled) and matches(pattern, single)

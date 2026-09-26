@@ -81,6 +81,7 @@ and your module's section. Everything is Python ≥3.10, stdlib + `pyyaml`, `ric
 | noise | `noise.fix_at_source` | noise to fix outside the rule (FIM path ignore, exposed service, agent config) |
 | noise | `noise.aggregate` | high-duplicate rule: aggregate (frequency/timeframe) instead of muting |
 | noise | `noise.do_not_tune` | noisy rule blocked by hard rule (level ≥ max_tunable, TP disposition) — informational |
+| noise | `noise.index_volume` | clean candidate with no analyst impact (already at/below the demote level or below triage_level): index/storage volume only — options: no_log child, level below log_alert_level, overwrite (with trade-offs) |
 | noise | `noise.emit_skipped` | a tune suggestion was not written as a Wazuh rule (unsafe/unsupported value, non-Wazuh data) — informational |
 | silence | `silence.silent` | a source that should be sending is not (P0 test) |
 | silence | `silence.drop` | volume dropped far below expected (NB tail + effect size) |
@@ -273,6 +274,12 @@ share of rule volume, share of analyst-facing volume, distinct agents affected, 
 and 3 example events. A candidate whose backtest hides any event with level ≥ `high_level` or any TP is
 downgraded to `investigate`.
 
+### 5.5b Noisy threshold and beaconing
+A rule is mined / called noisy only with ≥ `min_noisy_alerts` (50) alerts and ≥ `min_noisy_per_day` (5/day).
+"Beaconing" requires outbound traffic to the address and regular inter-arrival times (a per-candidate gap
+histogram; regularity ≥ 0.6); sustained but irregular public activity is labelled "sustained activity" and blocks
+tuning just the same.
+
 ### 5.6 Ranking and output
 Rank `tune` candidates by **analyst-facing clusters per day hidden** (impact) — never by a blended score.
 Low severity and regularity are never evidence of benignity. Time saved = hidden analyst-facing clusters/day ×
@@ -301,7 +308,9 @@ The indexer path fills the same cube via composite aggregations.
   `alpha_eff = alarm_budget / keys_evaluated`. Seasonality-aware by construction (night hours add little).
 * **DROP**: window `W = window` (grown until expected ≥ 20); observed vs expected; NB lower tail with
   moment-matched size; alarm when `cdf < alpha_eff` AND `observed/expected < drop_ratio`.
-* **DECAY**: recent 7 d median daily vs reference median (earlier baseline) ratio < 0.5, both ≥ 7 d.
+* **DECAY**: sustained decline judged on event SUMS up to "now" (the partial current day pro-rated by the key's
+  hourly profile): the last 2–6 days observed vs expected from an older reference (per-weekday expectations, up to
+  28 days), ratio < 0.5. A log source whose loss is covered by a silent host is folded into that host's finding.
 * **Duty class** from baseline: `always_on` (active ≥ 90% of hours), `business_hours`, `intermittent`.
 * **Monitorability**: `t_min` hours of normal expected traffic needed so `P0 < alpha_eff`; critical keys with
   `t_min > sla[tier]` → `silence.unmonitorable` (recommend a heartbeat).
@@ -321,6 +330,12 @@ The indexer path fills the same cube via composite aggregations.
 Per log_source, presence rate of each field (cap 300 fields per log_source, fields present in ≥ 5%)
 in baseline vs recent window; `silence.field_lost` when presence ≥ `field_presence_before` → ≤
 `field_presence_after` with ≥ `field_min_events` events in both windows. Treat `is_empty` values as absent.
+
+## 6.7 Cross-domain correlation (`hushwatch/analysis/correlate.py`)
+`link_findings()` turns one incident into one finding: tampering / silent / drop on a host explains
+`pipeline.agent_no_data` and `silence.unmonitorable` on that host and a coverage "silent" contract gap for the same
+source; `agent_disconnected` is kept over `silent`/`drop` on the same host. A finding is never folded into a less
+severe one; the keeper lists what it explains in `related` and `evidence["explained"]`.
 
 ## 7. Coverage (`hushwatch/analysis/coverage.py`)
 * Inventory = agents seen in data ∪ Wazuh API agents (with platform/groups) ∪ optional CSV.

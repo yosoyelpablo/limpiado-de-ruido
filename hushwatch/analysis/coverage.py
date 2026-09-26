@@ -873,6 +873,8 @@ class _Context:
     incomplete: bool = False  # partial failures, truncation/caps or sampling: absence cannot be proven
     not_assessed: list[str] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
+    # (platform, peer key) -> hosts of the platform-wide peer group that lack the key but could not be judged
+    peer_unjudged: dict[tuple[str, str], int] = field(default_factory=dict)
 
     @property
     def weak(self) -> bool:
@@ -1138,10 +1140,12 @@ def _peer_gaps(hosts: Sequence[_Host], ctx: _Context) -> tuple[dict[_BucketKey, 
                     continue
                 if host.data is not None and host.data.sources_overflow:
                     ctx.bump("peer_gaps_not_assessed")  # the source may be among the ones beyond the cap
+                    _count_unjudged(ctx, key, peer_key)
                     continue
                 expected = rate * _active_days_within(host.data, host.span_days, period)
                 if expected < MIN_EXPECTED_EVENTS:
                     ctx.bump("peer_gaps_not_assessed")
+                    _count_unjudged(ctx, key, peer_key)
                     continue
                 flagged.add((host.name, peer_key))
                 bucket = buckets.setdefault((key[0], key[1], peer_key, host.tier), [])
@@ -1151,6 +1155,11 @@ def _peer_gaps(hosts: Sequence[_Host], ctx: _Context) -> tuple[dict[_BucketKey, 
     if not evaluated_any:
         ctx.not_assessed.append("peer_groups_too_small")
     return buckets, expected_by_platform
+
+
+def _count_unjudged(ctx: _Context, group: tuple[str, str | None], peer_key: str) -> None:
+    if group[1] is None:  # the platform-wide group feeds the section's "expected sources" rows
+        ctx.peer_unjudged[(group[0], peer_key)] = ctx.peer_unjudged.get((group[0], peer_key), 0) + 1
 
 
 def _drop_contract_overlap(
@@ -1279,13 +1288,26 @@ def _contract_checks(
         min_rate = contract.min_events_per_day if contract.min_events_per_day and contract.min_events_per_day > 0 else 1
         for pattern in patterns:
             buckets: dict[tuple[str, str], list[_Gap]] = {}
-            counts = {"matched": len(matched), "present": 0, "missing": 0, "silent": 0, "low": 0, "not_assessed": 0}
+            # key order matters: tables show the first columns, and "not assessed" must never be the one cut off
+            counts = {"matched": len(matched), "present": 0, "missing": 0, "silent": 0, "not_assessed": 0, "low": 0}
+            unjudged: list[_Host] = []
             for host in matched:
                 state, detail = _contract_state(host, pattern, min_rate, ctx)
                 counts[state] = counts.get(state, 0) + 1
                 if state in ("missing", "silent", "low"):
                     buckets.setdefault((state, host.tier), []).append(_Gap(host, detail))
-            rows.append({"name": contract.name, "log_source": pattern, "min_events_per_day": min_rate, **counts})
+                elif state == "not_assessed":
+                    unjudged.append(host)
+            rows.append(
+                {
+                    "name": contract.name,
+                    "log_source": pattern,
+                    **counts,
+                    "min_events_per_day": min_rate,
+                    # which hosts the row could not judge (e.g. a host that went quiet: silence owns it)
+                    "not_assessed_hosts": [h.entity for h in unjudged[:MESSAGE_MAX_HOSTS]],
+                }
+            )
             for (state, tier), gaps in sorted(buckets.items(), key=lambda kv: (_TIER_RANK.get(kv[0][1], 1), kv[0][0])):
                 findings.append(
                     _contract_finding(contract.name, pattern, state, tier, gaps, len(matched), min_rate, criteria, ctx)
@@ -2174,12 +2196,16 @@ def _section(
     platforms: dict[str, dict[str, Any]] = {}
     for host in visible:
         key = host.platform or "unknown"
-        entry = platforms.setdefault(key, {"hosts": 0, "reporting": 0, "peer_group": False, "expected": []})
+        entry = platforms.setdefault(
+            key, {"hosts": 0, "reporting": 0, "peer_comparable": 0, "peer_group": False, "expected": []}
+        )
         entry["hosts"] += 1
+        if host.data is not None and host.data.count:
+            entry["reporting"] += 1  # sending data, relayed syslog devices included
         if host.comparable:
-            entry["reporting"] += 1
+            entry["peer_comparable"] += 1  # agents compared with their peers (relayed devices and the manager not)
     for platform, entry in platforms.items():
-        entry["peer_group"] = platform != "unknown" and entry["reporting"] >= MIN_PEER_GROUP
+        entry["peer_group"] = platform != "unknown" and entry["peer_comparable"] >= MIN_PEER_GROUP
         entry["expected"] = [_CLASS_LABELS.get(k, k) for k in peer_expected.get(platform, [])][:MATRIX_MAX_COLUMNS]
 
     contracts_for = {h.name: _host_contract_patterns(h, ctx) for h in visible}
@@ -2224,15 +2250,18 @@ def _section(
     for platform in sorted(peer_expected):
         for key in peer_expected[platform]:
             present = sum(1 for h in visible if h.platform == platform and h.comparable and key in h.keys)
-            reporting = platforms.get(platform, {}).get("reporting", 0)
+            comparable = platforms.get(platform, {}).get("peer_comparable", 0)
+            unjudged = ctx.peer_unjudged.get((platform, key), 0)
             expected_sources.append(
                 {
                     "basis": "peers",
                     "name": platform,
                     "log_source": _CLASS_LABELS.get(key, key),
-                    "matched": reporting,
+                    "matched": comparable,
                     "present": present,
-                    "missing": max(0, reporting - present),
+                    "missing": max(0, comparable - present - unjudged),
+                    "silent": 0,  # the peer check compares what hosts ever sent; stopped sources are silence's
+                    "not_assessed": unjudged,
                 }
             )
     own = [f for f in findings if f.domain == "coverage"]
@@ -2245,16 +2274,35 @@ def _section(
         or any(row.get("assessed") for row in event_rows)
         or any(f.evidence.get("check") == "inventory" for f in own)
     )
+    # Never a false green: "nothing is missing" needs enough history, and candidate gaps that could not be judged
+    # (too little data, capped sources, sparse alerts) are an open question, not a pass.
+    history_days = max(0.0, ctx.now_ts - ctx.window_start) / DAY_S if collector.events else 0.0
+    min_days = max(0.0, float(ctx.tenant.silence.min_history_days))
+    reasons: list[str] = []
+    if history_days < min_days:
+        reasons.append("short_history")
+    unjudged = sum(v for k, v in ctx.counters.items() if k.endswith("_not_assessed"))
+    unjudged += sum(1 for item in ctx.not_assessed if item.startswith(("contract_no_hosts:", "contract_invalid:")))
+    if unjudged:
+        reasons.append("gaps_not_assessed")
     if not visible or not assessed:
         status = "not_assessed"
     elif any(f.severity.rank >= Severity.HIGH.rank for f in own):
         status = "fail"
     elif any(f.severity.rank >= Severity.MEDIUM.rank for f in own):
         status = "warn"
+    elif "short_history" in reasons:
+        status = "not_assessed"  # no finding, but too little history to say nothing is missing
+    elif unjudged:
+        status = "warn"
     else:
         status = "ok"
     return {
         "status": status,
+        "status_reasons": reasons,
+        "history_days": round(history_days, 2),
+        "min_history_days": min_days,
+        "gaps_not_assessed": unjudged,
         "platforms": platforms,
         "matrix": matrix[:MATRIX_MAX_ROWS],
         "matrix_total": total_rows,

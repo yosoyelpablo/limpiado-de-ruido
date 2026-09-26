@@ -11,15 +11,21 @@ in a suggestion comes from logs an attacker can write. So this module:
   would also match before a trailing newline (hence ``\\z``);
 * maps each condition to the one Wazuh element with the same meaning as :meth:`Suggestion.matches` (§8 table),
   and refuses — never drops — conditions it cannot express exactly (dropping one would widen the scope);
-* DEMOTES by default: a child rule at ``level`` (3) that copies the parent's groups plus ``hushwatch_tuned``, so
-  events stay indexed and measurable; level 0 only on request. A child changes the rule an event is recorded
-  under, so ``if_matched_sid`` correlations on the parent, and ``if_matched_group`` correlations loaded before
-  this file (every stock one: analysisd wires group lists at load time), stop counting those events. Siblings
-  tried after the child (lower priority) and everything below them stop firing for them too;
+* DEMOTES by default: a child rule at ``level`` (3) that copies the parent's groups (compliance groups included,
+  rebuilt from the alerts' ``rule.pci_dss``/``gdpr``... when no ruleset was loaded), its MITRE ids and its
+  output options (``no_full_log``...) plus ``hushwatch_tuned``, so events stay indexed, measurable and shaped like
+  the parent's; level 0 only on request. A child that would not LOWER the parent's level is never written
+  (nothing to gain); index-volume-only candidates are explained in ``VALIDATION.md`` instead. A child changes
+  the rule an event is recorded under, so ``if_matched_sid`` correlations on the parent, and ``if_matched_group``
+  correlations loaded before this file (every stock one: analysisd wires group lists at load time), stop counting
+  those events. Siblings tried after the child (lower priority) and everything below them stop firing for them;
 * allocates ids from the tenant range, skipping every id of the loaded ruleset, and flags REVIEW REQUIRED (with
   the affected rules in ``VALIDATION.md``) when any of that happens;
 * re-parses its own output (ElementTree and the Wazuh-aware parser), compiles and self-tests every pattern, and
   writes nothing unless all checks pass. Files are 0600 in a 0700 directory and never silently overwritten.
+
+Wazuh has no rule expiry: each rule's expiry date is written in its description, and ``hushwatch audit`` reports
+the rule as ``tuning.expired`` once the date passes.
 
 Outputs: ``hushwatch_local_rules.xml``, ``hushwatch_suppressions.json`` (tool-agnostic spec), ``VALIDATION.md``
 (EN/ES checklist) and ``logtest_samples.txt`` (sample lines for ``wazuh-logtest``).
@@ -93,6 +99,10 @@ _XML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
 _DESCRIPTION_FORMAT = "hushwatch: demote {parent} for {scope} (fp:{fingerprint}, expires {expires}){review}"
 _COMMENT_FORMAT = " hushwatch fingerprint={fingerprint} created={created} expires={expires} review_required={review} "
 _REFUSED_PREFIXES = ("agent.", "rule.", "manager.", "cluster.", "decoder.", "predecoder.", "syscheck.", "location.")
+# Parent options that shape the child's OUTPUT and are copied to it (no_log/alert_by_email are not: a demoted alert
+# must stay logged, and must not start emailing anyone).
+COPIED_OPTIONS = ("no_full_log", "no_email_alert", "no_ar", "no_counter")
+_MITRE_ID = re.compile(r"^T[0-9]{4}(?:\.[0-9]{3})?$")
 
 register(
     {
@@ -124,8 +134,8 @@ register(
             "es": "Las reglas generadas no superaron la verificación de seguridad ({detail}); no se escribió nada",
         },
         "wazuh.emit.err.exists": {
-            "en": "{path} already exists; pass overwrite=True (--force) to replace it",
-            "es": "{path} ya existe; use overwrite=True (--force) para reemplazarlo",
+            "en": "{path} already exists; run again with --force to replace it (or choose another directory)",
+            "es": "{path} ya existe; vuelva a ejecutar con --force para reemplazarlo (o elija otro directorio)",
         },
         "wazuh.emit.err.out_dir": {
             "en": "Output path {path} exists and is not a directory",
@@ -223,6 +233,12 @@ register(
             "es": "Sugerencia {fingerprint} (regla {rule}) omitida: los grupos de la regla padre ocupan {length} "
             "caracteres y analysisd rechaza una regla cuya lista de grupos supera los 2048 bytes",
         },
+        "wazuh.emit.skip.not_lower": {
+            "en": "Suggestion {fingerprint} (rule {rule}) skipped: rule {rule} is already level {parent_level}, so a "
+            "level-{level} child would not lower it (nothing to gain)",
+            "es": "Sugerencia {fingerprint} (regla {rule}) omitida: la regla {rule} ya es de nivel {parent_level}, "
+            "así que una hija de nivel {level} no lo reduciría (no hay nada que ganar)",
+        },
         "wazuh.emit.skip.raises": {
             "en": "Suggestion {fingerprint} skipped: rule {rule} is level {parent_level}; a child at level {level} "
             "would raise it, not demote it",
@@ -252,6 +268,13 @@ register(
             "es": "El ruleset tuvo {count} error(es) de carga: las dependencias de correlación y los ids usados "
             "pueden estar incompletos",
         },
+        "wazuh.emit.warn.no_stock": {
+            "en": "Only local rules were loaded (no stock ruleset): correlation rules that depend on the parents "
+            "were not verified; every rule is marked REVIEW REQUIRED. Load /var/ossec/ruleset/rules as well",
+            "es": "Solo se cargaron reglas locales (sin el ruleset de fábrica): no se verificaron las reglas de "
+            "correlación que dependen de las reglas padre; todas las reglas quedan marcadas como REVISIÓN "
+            "OBLIGATORIA. Cargue también /var/ossec/ruleset/rules",
+        },
         "wazuh.emit.warn.parent_unverified": {
             "en": "Parent rule {rule} is not in the loaded ruleset (only local rules were given): confirm it exists "
             "before deploying",
@@ -267,10 +290,6 @@ register(
         "wazuh.emit.warn.group_dropped": {
             "en": "Group '{group}' of rule {rule} was not copied (characters not safe in a rule file)",
             "es": "El grupo '{group}' de la regla {rule} no se copió (caracteres no seguros en un archivo de reglas)",
-        },
-        "wazuh.emit.warn.not_lower": {
-            "en": "Rule {rule} is already level {parent_level}: the level-{level} child does not lower it",
-            "es": "La regla {rule} ya es de nivel {parent_level}: la hija de nivel {level} no lo reduce",
         },
         "wazuh.emit.warn.manager_agent": {
             "en": "Suggestion {fingerprint}: agent-name scoping cannot match manager-local events (agent 000), whose "
@@ -351,6 +370,14 @@ register(
             "que analysisd rechace detiene todo el manager y todos los agentes quedan sin visibilidad: siga todos "
             "los pasos, en el nodo master si el manager está en clúster. Requiere Wazuh 4.3 o posterior (PCRE2 "
             "en reglas).",
+        },
+        "wazuh.validation.expiry": {
+            "en": "Wazuh has no rule expiry: a rule stays active until someone removes it. Each rule's expiry date "
+            "is written in its description, and `hushwatch audit /var/ossec/etc/rules` reports it as expired "
+            "(tuning.expired) once the date passes: schedule that audit, then remove or renew the rule.",
+            "es": "Wazuh no hace vencer las reglas: una regla sigue activa hasta que alguien la quita. La fecha de "
+            "vencimiento de cada regla está en su descripción, y `hushwatch audit /var/ossec/etc/rules` la informa "
+            "como vencida (tuning.expired) cuando pasa: programe esa auditoría y luego quite o renueve la regla.",
         },
         "wazuh.validation.step_backup": {
             "en": "Back up the current custom rules:",
@@ -435,6 +462,40 @@ register(
             "ese archivo, después de la padre, o analysisd la descartará.",
         },
         "wazuh.validation.warnings_heading": {"en": "Warnings", "es": "Avisos"},
+        "wazuh.validation.skipped_heading": {
+            "en": "Suggestions not written as rules",
+            "es": "Sugerencias que no se escribieron como reglas",
+        },
+        "wazuh.validation.volume_heading": {
+            "en": "Index volume only (no rule written)",
+            "es": "Solo volumen del índice (no se escribió ninguna regla)",
+        },
+        "wazuh.validation.volume_intro": {
+            "en": "These scopes passed every safety gate and the backtest, but their rules are already at or below "
+            "level {level} or below the triage level, so a demote rule would change nothing for analysts. If index "
+            "volume is a real problem, the options are: (1) a scoped child rule (same if_sid and conditions as a "
+            "hushwatch rule) with <options>no_log</options>, or with a level below log_alert_level (3 by default): "
+            "the alerts are no longer written to alerts.json or the indexer (only to archives, if logall is on), "
+            "and correlation rules on the parent stop counting them; or (2) an overwrite of the parent rule "
+            '(overwrite="yes" with its full original body) with <options>no_log</options>: every alert of that '
+            "rule disappears, on every agent, and future Wazuh updates of the rule are masked. Both make these "
+            "events unsearchable during an investigation; hushwatch generates neither. Prefer keeping them.",
+            "es": "Estos alcances superaron todos los controles de seguridad y el backtest, pero sus reglas ya "
+            "tienen nivel {level} o inferior, o están por debajo del nivel de triaje, así que una regla de "
+            "degradación no cambiaría nada para los analistas. Si el volumen del índice es un problema real, las "
+            "opciones son: (1) una regla hija acotada (mismo if_sid y condiciones que una regla de hushwatch) con "
+            "<options>no_log</options>, o con un nivel inferior a log_alert_level (3 por defecto): las alertas "
+            "dejan de escribirse en alerts.json y en el indexador (solo quedan en archives, si logall está "
+            "activo), y las reglas de correlación sobre la regla padre dejan de contarlas; o (2) una sobrescritura "
+            'de la regla padre (overwrite="yes" con su cuerpo original completo) con <options>no_log</options>: '
+            "desaparecen todas las alertas de esa regla, en todos los agentes, y se ocultan las actualizaciones "
+            "futuras de la regla en Wazuh. Ambas impiden buscar estos eventos durante una investigación; hushwatch "
+            "no genera ninguna de las dos. Es preferible conservarlos.",
+        },
+        "wazuh.validation.volume_line": {
+            "en": "Rule {parent} for {fields} (fingerprint {fingerprint}): {per_day} alerts/day, level {level}",
+            "es": "Regla {parent} para {fields} (huella {fingerprint}): {per_day} alertas/día, nivel {level}",
+        },
     }
 )
 
@@ -449,14 +510,17 @@ class EmitError(Exception):
 
 @dataclass(slots=True)
 class EmitResult:
-    """What was written: ``paths`` (the rules XML first), ``rules`` as ``(id, fingerprint)``, ``warnings``
-    (including every skipped suggestion) and ``skipped`` as ``(fingerprint, reason)``."""
+    """What was written: ``paths`` (the rules XML first), ``rules`` as ``(id, fingerprint)``, ``skipped`` (the
+    suggestions NOT written as rules) as ``(fingerprint, reason)``, ``warnings`` (things to know about what WAS
+    written, or about the run; skipped suggestions are never repeated here), ``review_required`` (rule ids) and
+    ``index_volume`` (fingerprints of index-volume-only suggestions, explained in VALIDATION.md, never written)."""
 
     paths: list[Path] = field(default_factory=list)
     rules: list[tuple[int, str]] = field(default_factory=list)
     warnings: list[Message] = field(default_factory=list)
     skipped: list[tuple[str, Message]] = field(default_factory=list)
     review_required: list[int] = field(default_factory=list)
+    index_volume: list[str] = field(default_factory=list)
 
 
 # ---- PCRE2 escaping ----------------------------------------------------------------------------------------------
@@ -546,6 +610,8 @@ class _Plan:
     samples: list[str] = field(default_factory=list)
     preempted: list[tuple[str, int]] = field(default_factory=list)  # (rule id, level) that stop firing
     parent_after: bool = False  # the parent loads after XML_FILE: analysisd would discard the rule
+    options: tuple[str, ...] = ()  # parent output options copied to the child (COPIED_OPTIONS)
+    mitre: tuple[str, ...] = ()  # parent MITRE technique ids copied to the child
     rule_id: int = 0
     description: str = ""
     comment: str = ""
@@ -851,14 +917,18 @@ def _plan(
             raise _Skip(M("wazuh.emit.skip.parent_missing", fingerprint=fp, rule=parent))
         warnings.append(M("wazuh.emit.warn.parent_unverified", rule=parent))
         review = True
+    elif not has_stock:
+        review = True  # only local rules: the stock correlation rules on this parent were not verified
     parent_level = parent_rule.level if parent_rule is not None and parent_rule.level > 0 else suggestion.rule_level
     if isinstance(parent_level, int) and not isinstance(parent_level, bool):
         if level > parent_level:
             raise _Skip(
                 M("wazuh.emit.skip.raises", fingerprint=fp, rule=parent, parent_level=parent_level, level=level)
             )
-        if level == parent_level:
-            warnings.append(M("wazuh.emit.warn.not_lower", rule=parent, parent_level=parent_level, level=level))
+        if level == parent_level:  # a child that does not lower the level changes nothing: never written
+            raise _Skip(
+                M("wazuh.emit.skip.not_lower", fingerprint=fp, rule=parent, parent_level=parent_level, level=level)
+            )
     else:
         parent_level = None
 
@@ -903,9 +973,20 @@ def _plan(
         samples=_samples(suggestion.examples or ()),
         preempted=preempted,
         parent_after=parent_after,
+        options=tuple(o for o in COPIED_OPTIONS if parent_rule is not None and o in parent_rule.options),
+        mitre=_mitre_ids(parent_rule.mitre if parent_rule is not None else suggestion.rule_mitre),
     )
     _example_warnings(plan, warnings)
     return plan
+
+
+def _mitre_ids(values: Sequence[object]) -> tuple[str, ...]:
+    """Valid ATT&CK technique ids (``T1110``, ``T1110.001``), deduplicated, at most 16."""
+    out: list[str] = []
+    for value in values or ():
+        if isinstance(value, str) and _MITRE_ID.match(value) and value not in out:
+            out.append(value)
+    return tuple(out[:16])
 
 
 # ---- XML building and verification ---------------------------------------------------------------------------------
@@ -923,6 +1004,12 @@ def _build_xml(plans: Sequence[_Plan], level: int, created: date) -> str:
         for element in plan.elements:
             ET.SubElement(rule, element.tag, dict(element.attrs)).text = element.text
         ET.SubElement(rule, "description").text = plan.description
+        if plan.mitre:
+            mitre = ET.SubElement(rule, "mitre")
+            for technique in plan.mitre:
+                ET.SubElement(mitre, "id").text = technique
+        for option in plan.options:
+            ET.SubElement(rule, "options").text = option
         ET.SubElement(rule, "group").text = "".join(f"{g}," for g in plan.groups)
     ET.indent(root, space="  ")
     header = "\n".join(ET.tostring(ET.Comment(f" {line} "), encoding="unicode") for line in header_lines)
@@ -1024,7 +1111,8 @@ def _verify(xml_text: str, plans: Sequence[_Plan], level: int, used: set[int]) -
             or rule.if_group
             or rule.if_matched_sid
             or rule.if_matched_group
-            or rule.options
+            or rule.options != plan.options
+            or rule.mitre != plan.mitre
             or rule.overwrite
             or actual_conditions != expected_conditions
             or rule.groups != (*WRAPPER_GROUPS, *plan.groups)
@@ -1061,6 +1149,7 @@ def _spec(
     level: int,
     created: date,
     id_range: tuple[int, int],
+    volume: Sequence[Suggestion] = (),
 ) -> str:
     suppressions: list[dict[str, Any]] = []
     for plan in plans:
@@ -1090,6 +1179,8 @@ def _spec(
                 ],
                 "preempted_rules": [{"rule": rule_id, "level": lvl} for rule_id, lvl in plan.preempted],
                 "parent_loads_after_this_file": plan.parent_after,
+                "options": list(plan.options),
+                "mitre": list(plan.mitre),
                 "parent": {
                     "level": plan.parent_level,
                     "description": parent.description if parent is not None else _text_or_none(s.rule_description),
@@ -1115,6 +1206,17 @@ def _spec(
             for rule, fp, msg in skipped
         ],
         "warnings": [{lang: render(w, lang) for lang in ("en", "es")} for w in warnings],
+        "index_volume": [
+            {
+                "rule": _label(s.rule_id, 32),
+                "fingerprint": _label(s.fingerprint, 64),
+                "conditions": [{"field": c.field, "value": c.value} for c in s.conditions],
+                "level": _finite(s.rule_level),
+                "hidden_per_day": _finite(s.hidden_per_day),
+                "rule_written": False,
+            }
+            for s in volume
+        ],
     }
     return json.dumps(document, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
 
@@ -1126,6 +1228,8 @@ def _validation(
     *,
     level: int,
     created: date,
+    skipped: Sequence[tuple[str, str, Message]] = (),
+    volume: Sequence[Suggestion] = (),
 ) -> str:
     stamp = created.strftime("%Y%m%d")
     commands = {
@@ -1144,6 +1248,7 @@ def _validation(
             return render(M(key, **params), _lang)
 
         lines += [f"## {heading}", "", t("wazuh.validation.intro", created=created.isoformat()), ""]
+        lines += [t("wazuh.validation.expiry"), ""]
         steps = [
             (t("wazuh.validation.step_backup"), commands["backup"]),
             (t("wazuh.validation.step_copy"), commands["copy"]),
@@ -1190,6 +1295,28 @@ def _validation(
             for rule_id, rule_level in plan.preempted:
                 lines.append(f"  - {t('wazuh.validation.preempted', rule=_label(rule_id, 12), level=rule_level)}")
         lines.append("")
+        if volume:
+            lines += [f"### {t('wazuh.validation.volume_heading')}", ""]
+            lines += [_md_safe(t("wazuh.validation.volume_intro", level=level)), ""]
+            for s in volume:
+                fields = ", ".join(_label(c.field) for c in s.conditions) or "-"
+                per_day = _finite(s.hidden_per_day)
+                lines.append(
+                    "- "
+                    + t(
+                        "wazuh.validation.volume_line",
+                        parent=_label(s.rule_id, 32),
+                        fields=fields,
+                        fingerprint=_label(s.fingerprint, 64),
+                        per_day=float(per_day) if per_day is not None else 0.0,
+                        level=_label(s.rule_level if s.rule_level is not None else "?", 8),
+                    )
+                )
+            lines.append("")
+        if skipped:
+            lines += [f"### {t('wazuh.validation.skipped_heading')}", ""]
+            lines += [f"- {_md_safe(render(message, lang))}" for _rule, _fp, message in skipped]
+            lines.append("")
         if warnings:
             lines += [f"### {t('wazuh.validation.warnings_heading')}", ""]
             lines += [f"- {_md_safe(render(w, lang))}" for w in warnings]
@@ -1283,13 +1410,16 @@ def emit_suppressions(
     allow_level_zero: bool = False,
     allow_rule_wide: bool = False,
 ) -> EmitResult:
-    """Write reviewed-ready Wazuh 4.x suppression rules for ``suggestions`` into ``out_dir``.
+    """Write review-ready Wazuh 4.x suppression rules for ``suggestions`` into ``out_dir``.
 
     Only suggestions with verdict ``tune`` and profile ``wazuh4`` whose every condition maps exactly to a Wazuh
-    element are emitted; the others are skipped with a warning (see :attr:`EmitResult.skipped`). Each becomes a
-    child of its rule (``if_sid``) at ``level`` (DEMOTE: still indexed and measurable), copying the parent's
-    groups plus ``hushwatch_tuned``. Level 0 (DROP) requires ``allow_level_zero`` and is refused for rules that
-    feed correlation; condition-less (whole-rule) suggestions require ``allow_rule_wide``.
+    element, and whose parent is above ``level``, are emitted; the others are listed in
+    :attr:`EmitResult.skipped` with the reason (never in ``warnings``). Each becomes a child of its rule
+    (``if_sid``) at ``level`` (DEMOTE: still indexed and measurable), copying the parent's groups, MITRE ids and
+    output options plus ``hushwatch_tuned``. Index-volume-only suggestions (verdict ``watch``, impact
+    ``index_volume``) are never written as rules: VALIDATION.md explains the real volume options and their
+    trade-offs. Level 0 (DROP) requires ``allow_level_zero`` and is refused for rules that feed correlation;
+    condition-less (whole-rule) suggestions require ``allow_rule_wide``.
 
     Raises :class:`EmitError` for profile ``wazuh5`` (or any non-4.x profile), an invalid level or id range, an
     exhausted range, an id collision, output that fails the re-parse/self-test, or existing files without
@@ -1315,16 +1445,23 @@ def emit_suppressions(
         warnings.append(M("wazuh.emit.warn.range", low=low, high=high))
     if level == 0:
         warnings.append(M("wazuh.emit.warn.level_zero"))
+    has_stock = ruleset is not None and ruleset.has_stock
     if ruleset is None:
         warnings.append(M("wazuh.emit.warn.no_ruleset"))
-    elif ruleset.errors:
-        warnings.append(M("wazuh.emit.warn.ruleset_errors", count=len(ruleset.errors)))
-    has_stock = ruleset is not None and any(not r.is_local for r in ruleset.all_rules)
+    else:
+        if ruleset.errors:
+            warnings.append(M("wazuh.emit.warn.ruleset_errors", count=len(ruleset.errors)))
+        if not has_stock:
+            warnings.append(M("wazuh.emit.warn.no_stock"))
 
     plans: list[_Plan] = []
     skipped: list[tuple[str, str, Message]] = []
+    volume: list[Suggestion] = []
     seen_scopes: dict[tuple[str, frozenset[tuple[str, str]]], str] = {}
     for suggestion in suggestions:
+        if getattr(suggestion, "verdict", None) == "watch" and getattr(suggestion, "impact", "") == "index_volume":
+            volume.append(suggestion)  # explained in VALIDATION.md, never written as a rule
+            continue
         try:
             plan = _plan(
                 suggestion,
@@ -1343,10 +1480,10 @@ def emit_suppressions(
         except _Skip as skip:
             fp = _label(getattr(suggestion, "fingerprint", ""), 64)
             skipped.append((_label(getattr(suggestion, "rule_id", ""), 32), fp, skip.message))
-            result.skipped.append((fp, skip.message))
-            warnings.append(skip.message)
+            result.skipped.append((fp, skip.message))  # skipped, not a warning: never counted twice
             continue
         plans.append(plan)
+    result.index_volume = [_label(s.fingerprint, 64) for s in volume]
 
     if not plans:
         warnings.append(M("wazuh.emit.warn.nothing"))
@@ -1389,8 +1526,11 @@ def emit_suppressions(
     _prepare_dir(out_dir, targets, overwrite, warnings)
     contents = [
         (targets[0], xml_text),
-        (targets[1], _spec(plans, skipped, warnings, level=level, created=today, id_range=(low, high))),
-        (targets[2], _validation(plans, sample_ranges, warnings, level=level, created=today)),
+        (targets[1], _spec(plans, skipped, warnings, level=level, created=today, id_range=(low, high), volume=volume)),
+        (
+            targets[2],
+            _validation(plans, sample_ranges, warnings, level=level, created=today, skipped=skipped, volume=volume),
+        ),
         (targets[3], "".join(f"{line}\n" for line in sample_lines)),
     ]
     _write_all(contents, overwrite)

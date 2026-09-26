@@ -47,7 +47,8 @@ Then point it at your own data:
 
 ```bash
 # Wazuh manager (read access to the alerts; run as a member of the 'wazuh' group, not root)
-hushwatch report /var/ossec/logs/alerts/alerts.json --ruleset /var/ossec/etc/rules -f html -o report.html
+hushwatch report /var/ossec/logs/alerts/alerts.json \
+  --ruleset /var/ossec/ruleset/rules --ruleset /var/ossec/etc/rules -f html -o report.html
 
 # Spanish report, pseudonymized so you can share it with a client or vendor
 hushwatch report alerts.json --lang es --redact -f html -o informe.html
@@ -57,7 +58,7 @@ hushwatch report alerts.json --lang es --redact -f html -o informe.html
 
 | Domain | What you get | Example |
 |---|---|---|
-| **Noise** | Scoped, gated, backtested tuning suggestions — plus ready-to-review Wazuh rules | *"Rule 60106 on srv-backup-01 for `svc_backup` = 34% of the rule, every night for 21 days. Hiding it removes 157 alerts/day and no high-severity alert."* |
+| **Noise** | Scoped, gated, backtested tuning suggestions — plus ready-to-review Wazuh rules | *"Rule 5710 from the internal scanner 10.20.0.15 = 52% of the rule, every night for 21 days. Demoting it removes ~200 analyst-facing alerts/day and hides no high-severity alert — review required: brute-force rule 5712 counts these events."* |
 | | Noisy rules that must **not** be tuned, and why | *"5710 from 203.0.113.50: first seen 2 days ago, co-occurs with brute-force rule 5712 (level 10) → investigate, or restrict exposure."* |
 | **Silence** | Sources, channels and rules that went quiet — calibrated, grouped by root cause | *"dc02 stopped sending 30 h ago, 20 min after 'audit log cleared' (1102) → possible defense evasion (T1070.001)."* |
 | | Fields that disappeared | *"fw-edge-01 lost `data.dstport` on 2026-09-20 (100% → 0%) — every rule using it is blind."* |
@@ -81,8 +82,9 @@ hushwatch report alerts.json --lang es --redact -f html -o informe.html
   * true-positive dispositions.
 * Every suggestion is **backtested**: it is replayed over the whole window with exactly the semantics of the
   generated rule, and downgraded if it would hide any high-level alert or confirmed true positive.
-* Generated Wazuh rules **demote** the alert (they don't drop it, so it stays searchable), use anchored and fully
-  escaped PCRE2 patterns, and expire. When other correlation rules depend on the tuned rule (for example a
+* Generated Wazuh rules **demote** the alert (they don't drop it, so it stays searchable) and use anchored, fully
+  escaped PCRE2 patterns. Wazuh has no rule expiry, so each rule carries an expiry date in its description and
+  `hushwatch audit` reports expired ones. When other correlation rules depend on the tuned rule (for example a
   brute-force frequency rule), or a sibling rule would be preempted, the suggestion is marked **REVIEW REQUIRED**
   and lists exactly which rules are affected. Every file comes with a validation checklist
   (`wazuh-analysisd -t`, `wazuh-logtest`, rollback).
@@ -127,13 +129,18 @@ simply switched off at night:
 | `hushwatch report [INPUTS]` | Everything: noise, silence, coverage, pipeline, tuning debt |
 | `hushwatch noise [INPUTS]` | Only tuning analysis (`--emit-suppressions DIR` writes Wazuh rules) |
 | `hushwatch silence [INPUTS]` | Only silence, coverage and pipeline health |
-| `hushwatch audit RULES_DIR` | Audit existing Wazuh suppressions |
+| `hushwatch audit RULES_DIRS...` | Audit existing Wazuh suppressions (pass the stock ruleset too so correlation checks can be verified) |
 | `hushwatch check` | Cron mode: finding lifecycle (new / open / resolved / regressed / flapping), notify only on changes, heartbeats |
 | `hushwatch fleet` | MSSP view: every tenant side by side |
 | `hushwatch doctor` | Diagnose config, files, indexer, Wazuh API, TLS — with the exact fix |
 
 Common options: `-f console|html|md|json`, `-o FILE`, `--lang en|es`, `--redact`, `--fail-on SEVERITY`,
-`--since 21d`, `--dispositions verdicts.csv`, `--ruleset DIR`, `-c config.yml -t tenant`.
+`--since 21d`, `--now ISO`, `--dispositions verdicts.csv`, `--ruleset DIR` (repeatable), `--agents agents.json`,
+`--force`, `-c config.yml -t tenant`.
+
+> **Tip:** always pass the stock ruleset (`/var/ossec/ruleset/rules`) together with your local rules. Without it
+> hushwatch cannot see which correlation rules depend on a noisy rule, so every suggestion is marked
+> REVIEW REQUIRED and the analysis is flagged as incomplete.
 
 **Exit codes:**
 * `0`: clean;

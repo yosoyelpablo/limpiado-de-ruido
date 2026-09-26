@@ -312,7 +312,12 @@ def test_missing_parent_is_reported_when_the_stock_ruleset_is_loaded() -> None:
         '<rule id="100001" level="0"><if_sid>424242</if_sid><hostname>^h$</hostname><description>d</description></rule>'
     )
     assert "missing_parent" in checks(audit_local(local), "100001")
-    assert audit_local(local, with_stock=False).findings == []  # parents unknowable: nothing to claim
+    # parents unknowable: nothing to claim about the rule, but the audit says it could not verify correlation
+    unverified = audit_local(local, with_stock=False)
+    assert [(f.kind, f.subject, f.severity) for f in unverified.findings] == [
+        ("assessment.incomplete", "ruleset:no-stock", Severity.MEDIUM)
+    ]
+    assert unverified.section["stock_rules_loaded"] is False and unverified.section["status"] == "ok"
 
 
 def test_parent_loaded_after_the_child_counts_as_missing() -> None:

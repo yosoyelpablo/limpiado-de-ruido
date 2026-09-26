@@ -77,32 +77,32 @@ register(
         "net.err.tls_verify": {
             "en": "TLS certificate verification failed for {url} ({reason}). Set ca_cert to the CA certificate "
             "that signed the server certificate{hint}. Do not disable verification.",
-            "es": "Falló la verificación del certificado TLS de {url} ({reason}). Configura ca_cert con el "
-            "certificado de la CA que firmó el certificado del servidor{hint}. No desactives la verificación.",
+            "es": "Falló la verificación del certificado TLS de {url} ({reason}). Configure ca_cert con el "
+            "certificado de la CA que firmó el certificado del servidor{hint}. No desactive la verificación.",
         },
         "net.err.tls_hostname": {
             "en": "The TLS certificate of {url} does not match its host name ({reason}). Use a host name or IP "
             "address listed in the certificate (subjectAltName) in the URL, or reissue the certificate.",
-            "es": "El certificado TLS de {url} no corresponde a su nombre de host ({reason}). Usa en la URL un "
-            "nombre o IP incluido en el certificado (subjectAltName) o vuelve a emitir el certificado.",
+            "es": "El certificado TLS de {url} no corresponde a su nombre de host ({reason}). Use en la URL un "
+            "nombre o IP incluido en el certificado (subjectAltName) o vuelva a emitir el certificado.",
         },
         "net.err.tls": {
             "en": "TLS handshake with {url} failed ({reason}). Check that the scheme (https/http) and port are "
             "correct.",
-            "es": "Falló la negociación TLS con {url} ({reason}). Comprueba que el esquema (https/http) y el "
+            "es": "Falló la negociación TLS con {url} ({reason}). Verifique que el esquema (https/http) y el "
             "puerto sean correctos.",
         },
         "net.err.connect": {
             "en": "Cannot connect to {url} ({reason}). Check the URL, the port, firewalls and that the service "
             "is running.",
-            "es": "No se puede conectar con {url} ({reason}). Revisa la URL, el puerto, los cortafuegos y que el "
+            "es": "No se puede conectar con {url} ({reason}). Revise la URL, el puerto, los cortafuegos y que el "
             "servicio esté en marcha.",
         },
         "net.err.timeout": {
             "en": "The request '{op}' to {url} timed out after {seconds:.0f} s. Increase 'timeout' or narrow "
             "the time range.",
-            "es": "La petición '{op}' a {url} superó el tiempo de espera ({seconds:.0f} s). Aumenta 'timeout' o "
-            "reduce el intervalo de tiempo.",
+            "es": "La petición '{op}' a {url} superó el tiempo de espera ({seconds:.0f} s). Aumente 'timeout' o "
+            "reduzca el intervalo de tiempo.",
         },
         "net.err.connection": {
             "en": "The connection to {url} failed during '{op}' ({reason}).",
@@ -111,7 +111,7 @@ register(
         "net.err.ca_file": {
             "en": "Cannot load the CA certificate {path} ({reason}). ca_cert must point to a readable PEM file "
             "or directory.",
-            "es": "No se puede cargar el certificado de CA {path} ({reason}). ca_cert debe apuntar a un fichero "
+            "es": "No se puede cargar el certificado de CA {path} ({reason}). ca_cert debe apuntar a un archivo "
             "PEM o directorio legible.",
         },
         "net.err.url": {
@@ -121,7 +121,7 @@ register(
         "net.err.url_credentials": {
             "en": "The URL {url} embeds credentials. Remove them from the URL and set username/password (as "
             "${{ENV_VAR}} references) instead.",
-            "es": "La URL {url} incluye credenciales. Quítalas de la URL y usa username/password (como "
+            "es": "La URL {url} incluye credenciales. Quítelas de la URL y use username/password (como "
             "referencias ${{VARIABLE}}) en su lugar.",
         },
         "net.err.timeout_value": {
@@ -131,26 +131,26 @@ register(
         "net.err.connect_timeout": {
             "en": "Cannot connect to {url}: no answer within {seconds:.0f} s. Check the URL, the port, firewalls "
             "and that the service is running.",
-            "es": "No se puede conectar con {url}: sin respuesta en {seconds:.0f} s. Revisa la URL, el puerto, los "
+            "es": "No se puede conectar con {url}: sin respuesta en {seconds:.0f} s. Revise la URL, el puerto, los "
             "cortafuegos y que el servicio esté en marcha.",
         },
         "net.err.too_large": {
             "en": "The response of {url} to '{op}' exceeded the {limit:.0f} MiB safety limit and was discarded; "
             "the results are incomplete. Request smaller pages (e.g. a lower page_size).",
             "es": "La respuesta de {url} a '{op}' superó el límite de seguridad de {limit:.0f} MiB y se descartó; "
-            "los resultados están incompletos. Pide páginas más pequeñas (p. ej. un page_size menor).",
+            "los resultados están incompletos. Pida páginas más pequeñas (p. ej. un page_size menor).",
         },
         "net.warn.tls_disabled": {
             "en": "TLS certificate verification is DISABLED for {url} (verify_tls: false). Traffic and "
             "credentials can be intercepted; set ca_cert instead.",
             "es": "La verificación de certificados TLS está DESACTIVADA para {url} (verify_tls: false). El "
-            "tráfico y las credenciales pueden interceptarse; configura ca_cert en su lugar.",
+            "tráfico y las credenciales pueden interceptarse; configure ca_cert en su lugar.",
         },
         "net.warn.plain_http": {
             "en": "{url} is reached over plain HTTP: credentials, tokens and security data cross the network "
             "unencrypted. Use https.",
             "es": "Se accede a {url} por HTTP sin cifrar: credenciales, tokens y datos de seguridad viajan por la "
-            "red en claro. Usa https.",
+            "red en claro. Use https.",
         },
         "net.reason.scheme": {
             "en": "the scheme must be http or https",
@@ -240,6 +240,28 @@ def sanitize_text(value: object, *, limit: int = 300, secrets: Iterable[str | No
     if len(text) > limit:
         text = text[: max(0, limit - 1)].rstrip() + "…"
     return text
+
+
+def sanitize_message(msg: Message, *, limit: int = 300, secrets: Iterable[str | None] = ()) -> Message:
+    """``msg`` with every text parameter made safe like :func:`sanitize_text` (nested messages and entity values
+    too), for messages built from server-provided text that end up in a report (``DataBasis.partial_failures``)."""
+    known = tuple(secret for secret in secrets if secret)
+
+    def clean(value: Any, depth: int) -> Any:
+        if isinstance(value, str):
+            return sanitize_text(value, limit=limit, secrets=known)
+        if isinstance(value, Entity):
+            return Entity(value.kind, sanitize_text(value.value, limit=limit, secrets=known))
+        if isinstance(value, Message):
+            if depth > 8:
+                return sanitize_text(render(value, "en"), limit=limit, secrets=known)
+            return Message(value.key, {str(k): clean(v, depth + 1) for k, v in value.params.items()}, value.default)
+        if isinstance(value, (list, tuple)):
+            return [clean(item, depth + 1) for item in list(value)[:50]]
+        return value
+
+    cleaned = clean(msg, 0)
+    return cleaned if isinstance(cleaned, Message) else msg
 
 
 def safe_url(url: str | httpx.URL | None) -> str:

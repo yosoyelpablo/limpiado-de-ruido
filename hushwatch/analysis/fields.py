@@ -14,7 +14,10 @@ source)**, and grouped at analysis time:
   source listing the affected hosts (subject ``ls:<log source>|field:<name>``), never one per host.
 
 :class:`FieldCollector` counts, per (host, log source) and tenant-local day, how many events carried each field
-(values that are empty per :func:`hushwatch.models.is_empty` count as absent). :func:`analyze_fields` then picks
+(values that are empty per :func:`hushwatch.models.is_empty` count as absent), and when each field was last seen
+(so a finding says exactly when a field vanished, not just the day after). The alert envelope the SIEM writes itself
+(``rule.*``, ``agent.*``, ``manager.*``, ids and arrival time) is not tracked: it is not parsed from the source, and
+its presence only reflects which rules fired. :func:`analyze_fields` then picks
 the most recent run of days where the field is (almost) absent and compares it with the baseline before it:
 presence ``>= field_presence_before`` → ``<= field_presence_after`` with ``>= field_min_events`` events on both
 sides. The transition day (field vanished mid-day) belongs to neither side.
@@ -31,7 +34,7 @@ from __future__ import annotations
 
 import math
 from array import array
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -96,6 +99,11 @@ DETECTION_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+# Alert envelope written by the SIEM itself (the matched rule, the agent and manager, ids and arrival time), not
+# parsed from the log: tracking it would only measure which rules fired. Field health covers the event content.
+_ENVELOPE_KEYS: frozenset[str] = frozenset({"id", "_id", "_index", "timestamp", "@timestamp", "event.ingested"})
+_ENVELOPE_PREFIXES: tuple[str, ...] = ("rule.", "agent.", "manager.", "cluster.", "kibana.alert.", "signal.")
+
 # Must match hushwatch.models.is_empty for stripped strings (fast path; anything else goes through is_empty).
 _EMPTY_STRINGS = frozenset({"", "-", "null", "NULL", "(NULL)", "None", "N/A", "n/a", "unknown"})
 _PLAIN_TYPES = (int, float, bool)
@@ -127,7 +135,8 @@ def _name(value: object) -> str:
 @dataclass(slots=True)
 class _Host:
     days: dict[int, array[int]] = field(default_factory=dict)  # local day ordinal -> counts by column (0 = events)
-    totals: array[int] = field(default_factory=lambda: array("Q", [0]))  # counts by column over the kept days
+    # epoch seconds of the newest event that carried each column (0 = never): when a lost field was last seen
+    last: array[float] = field(default_factory=lambda: array("d", [0.0]))
 
 
 @dataclass(slots=True)
@@ -168,6 +177,7 @@ class FieldCollector:
         self.max_days = 2 * (max(1, math.ceil(tenant.silence.baseline / timedelta(days=1))) + HORIZON_EXTRA_DAYS)
         self._sources: dict[str, _Source] = {}
         self._day_cache: dict[int, int] = {}
+        self._epoch = 0.0  # epoch seconds of the event being added (set by _local_day)
         self._n_keys = 0
         self.events = 0
         self.skipped = 0  # events without log source, timestamp or fields
@@ -184,50 +194,72 @@ class FieldCollector:
         if not ls or not fields or not isinstance(fields, Mapping):
             self.skipped += 1
             return
-        day = self._local_day(event.ts)
+        ts = event.ts
+        day = self._local_day(ts)
         if day is None:
             self.skipped += 1
             return
-        src = self._source(_name(ls))
+        src = self._sources.get(ls) if ls.__class__ is str and len(ls) <= MAX_FIELD_NAME else None
         if src is None:
-            return
-        host = self._host(src, _name(event.source) if event.source else "")
-        rows = self._rows(src, host, day)
-        if rows is None:
-            return
-        row, agg = rows
-        totals = host.totals
+            src = self._source(_name(ls))
+            if src is None:
+                return
+        source = event.source
+        host_name = source if source.__class__ is str and len(source) <= MAX_FIELD_NAME else _name(source or "")
+        host = src.hosts.get(host_name) or self._host(src, host_name)
         width = len(src.names)
-        if len(totals) < width:
-            totals.extend([0] * (width - len(totals)))
+        row = host.days.get(day)
+        agg = src.agg.get(day)
+        if row is None or agg is None or len(row) < width or len(agg) < width:  # fast path: both rows exist
+            rows = self._rows(src, host, day)
+            if rows is None:
+                return
+            row, agg = rows
+        last = host.last
+        if len(last) < width:
+            last.extend([0.0] * (width - len(last)))
+        epoch = self._epoch
         row[0] += 1
         agg[0] += 1
-        totals[0] += 1
         src.n += 1
         self.events += 1
         columns = src.columns
-        seen = 0
-        for name, value in fields.items():
-            seen += 1
-            if seen > self.max_fields_per_event:
-                src.truncated = True
-                break
-            if _absent(value):
+        empty = _EMPTY_STRINGS
+        items: Iterable[tuple[Any, Any]] = fields.items()
+        if len(fields) > self.max_fields_per_event:
+            src.truncated = True
+            items = list(fields.items())[: self.max_fields_per_event]
+        for name, value in items:
+            # inline _absent (hot loop): None, placeholder strings, empty containers are "absent"
+            if value is None:
                 continue
-            if name.__class__ is not str or len(name) > MAX_FIELD_NAME:
-                name = _name(name)
             col = columns.get(name)
-            if col is None:
-                col = self._admit(src, name)
-                if col < 0:
+            if col is None and (name in _ENVELOPE_KEYS or name.startswith(_ENVELOPE_PREFIXES)):
+                continue  # written by the SIEM, not parsed from the source: its "loss" says nothing about parsing
+            cls = value.__class__
+            if cls is str:
+                if value in empty or ((value[0].isspace() or value[-1].isspace()) and is_empty(value)):
                     continue
-                width = len(src.names)
-                for target in (row, agg, totals):
-                    if len(target) < width:
-                        target.extend([0] * (width - len(target)))
+            elif cls is not int and cls is not float and cls is not bool and is_empty(value):
+                continue
+            if col is None:
+                if name.__class__ is not str or len(name) > MAX_FIELD_NAME:
+                    name = _name(name)
+                    col = columns.get(name)
+                if col is None:
+                    col = self._admit(src, name)
+                    if col < 0:
+                        continue
+                    width = len(src.names)
+                    for target in (row, agg):
+                        if len(target) < width:
+                            target.extend([0] * (width - len(target)))
+                    if len(last) < width:
+                        last.extend([0.0] * (width - len(last)))
             row[col] += 1
             agg[col] += 1
-            totals[col] += 1
+            if epoch > last[col]:
+                last[col] = epoch
 
     def _source(self, ls: str) -> _Source | None:
         src = self._sources.get(ls)
@@ -292,11 +324,7 @@ class FieldCollector:
         src.dropped_days += 1
         del src.agg[day]
         for host in src.hosts.values():
-            row = host.days.pop(day, None)
-            if row is not None:
-                totals = host.totals
-                for col in range(min(len(row), len(totals))):
-                    totals[col] -= row[col]
+            host.days.pop(day, None)
 
     def _admit(self, src: _Source, name: str) -> int:
         if len(src.columns) >= self.max_fields_per_source and not self._make_room(src):
@@ -337,14 +365,15 @@ class FieldCollector:
                 if col < len(agg):
                     agg[col] = 0
             for host in src.hosts.values():
-                if col < len(host.totals):
-                    host.totals[col] = 0
+                if col < len(host.last):
+                    host.last[col] = 0.0
                 for row in host.days.values():
                     if col < len(row):
                         row[col] = 0
         return len(src.columns) < self.max_fields_per_source
 
     def _local_day(self, ts: object) -> int | None:
+        """Tenant-local day ordinal of ``ts`` (None when unusable); leaves its epoch seconds in ``self._epoch``."""
         if not isinstance(ts, datetime):
             return None
         if ts.tzinfo is None:
@@ -355,6 +384,7 @@ class FieldCollector:
             return None
         if not math.isfinite(epoch):
             return None
+        self._epoch = epoch
         hour = int(epoch // 3600)
         day = self._day_cache.get(hour)
         if day is None:
@@ -392,16 +422,19 @@ class FieldCollector:
                     if rows is None:
                         continue
                     row, agg = rows
-                    width = len(src.names)
-                    if len(host.totals) < width:
-                        host.totals.extend([0] * (width - len(host.totals)))
                     for col, value in enumerate(their_row):
                         target = mapping.get(col)
                         if target is None or not value:
                             continue
                         row[target] += value
                         agg[target] += value
-                        host.totals[target] += value
+                width = len(src.names)
+                if len(host.last) < width:
+                    host.last.extend([0.0] * (width - len(host.last)))
+                for col, seen in enumerate(their_host.last):
+                    target = mapping.get(col)
+                    if target is not None and seen > host.last[target]:
+                        host.last[target] = seen
             src.truncated = src.truncated or theirs.truncated
             src.dropped_fields += theirs.dropped_fields
             src.dropped_days += theirs.dropped_days
@@ -455,8 +488,9 @@ class _Lost:
     after: float
     events_before: int
     events_after: int
-    since: int  # day ordinal of the first "absent" day
+    since: int  # day ordinal of the day the field vanished (the transition day when it vanished mid-day)
     volume_ratio: float  # events per day after / before (a collapse suggests a change in what is sent)
+    last_seen: float = 0.0  # epoch seconds of the newest event that still carried the field (0: unknown)
 
 
 def analyze_fields(
@@ -494,7 +528,11 @@ def analyze_fields(
         wide = [item for item in aggregate if item.field in wide_fields or item.field not in attributed]
         for name in sorted(wide_fields - {item.field for item in wide}):
             best = max(shared[name], key=lambda i: i.events_before)  # aggregate diluted by healthy hosts
-            wide.append(_Lost(ls, None, name, best.before, best.after, 0, 0, best.since, best.volume_ratio))
+            since = min(i.since for i in shared[name])
+            last_seen = max(i.last_seen for i in shared[name])
+            wide.append(
+                _Lost(ls, None, name, best.before, best.after, 0, 0, since, best.volume_ratio, last_seen=last_seen)
+            )
         hosts_by_field = {name: sorted(i.host for i in shared.get(name, []) if i.host) for name in wide_fields}
         if wide:
             findings.append(_wide_finding(ls, wide, hosts_by_field, tenant, basis))
@@ -543,16 +581,16 @@ def _host_losses(
         if len(days) < 2:
             continue
         last = host.days[days[-1]]
-        totals = host.totals
         for col, name in columns:
             # cheap prefilter: absent on the host's last day and common over the kept history
             if (last[col] if col < len(last) else 0) > after_max * last[0]:
                 continue
-            if (totals[col] if col < len(totals) else 0) < before_min * min_events:
+            if sum(row[col] for row in host.days.values() if col < len(row)) < before_min * min_events:
                 continue
             item = _field_lost(_series(host.days, days, col), before_min, after_max, min_events)
             if item is not None:
                 item.log_source, item.host, item.field = ls, host_name, name
+                item.last_seen = host.last[col] if col < len(host.last) else 0.0
                 out.setdefault(host_name, []).append(item)
     return out
 
@@ -571,6 +609,7 @@ def _aggregate_losses(
         item = _field_lost(_series(src.agg, days, col), before_min, after_max, min_events)
         if item is not None:
             item.log_source, item.host, item.field = ls, None, name
+            item.last_seen = max((h.last[col] for h in src.hosts.values() if col < len(h.last)), default=0.0)
             out.append(item)
     return out
 
@@ -591,9 +630,12 @@ def _field_lost(
         cut = idx
     if cut == len(series) or cut == 0 or recent_events < min_events:
         return None
-    # 2. the baseline before it; the transition day (field vanished mid-day) belongs to neither side
+    # 2. the baseline before it; the transition day (field vanished mid-day) belongs to neither side, but it is the
+    #    day the loss began
     base = series[:cut]
+    since = series[cut][0]
     if base[-1][1] < before_min * base[-1][2] and len(base) > 1:
+        since = base[-1][0]
         base = base[:-1]
     base_present = sum(present for _, present, _ in base)
     base_events = sum(n for _, _, n in base)
@@ -607,7 +649,7 @@ def _field_lost(
         after=recent_present / recent_events,
         events_before=base_events,
         events_after=recent_events,
-        since=series[cut][0],
+        since=since,
         volume_ratio=(recent_events / (len(series) - cut)) / (base_events / len(base)),
     )
 
@@ -622,6 +664,7 @@ def _row(item: _Lost, hosts: list[str]) -> dict[str, Any]:
         "events_before": item.events_before,
         "events_after": item.events_after,
         "since": date.fromordinal(item.since).isoformat(),
+        "last_seen": _iso(item.last_seen),
     }
 
 
@@ -634,6 +677,7 @@ def _field_evidence(items: list[_Lost]) -> list[dict[str, Any]]:
             "events_before": i.events_before,
             "events_after": i.events_after,
             "since": date.fromordinal(i.since).isoformat(),
+            "last_seen": _iso(i.last_seen),
             "detection_relevant": i.field in DETECTION_FIELDS,
         }
         for i in items[:50]
@@ -650,9 +694,15 @@ def _field_reasons(items: list[_Lost], basis: DataBasis | None) -> tuple[list[Me
             events_before=i.events_before,
             events_after=i.events_after,
             since=date.fromordinal(i.since).isoformat(),
+            last_seen=_iso(i.last_seen) or "-",
         )
         if i.events_before
-        else M("silence.field.reason_hosts", field=i.field, since=date.fromordinal(i.since).isoformat())
+        else M(
+            "silence.field.reason_hosts",
+            field=i.field,
+            since=date.fromordinal(i.since).isoformat(),
+            last_seen=_iso(i.last_seen) or "-",
+        )
         for i in items[:10]
     ]
     low = False
@@ -665,6 +715,22 @@ def _field_reasons(items: list[_Lost], basis: DataBasis | None) -> tuple[list[Me
         reasons.append(M("silence.field.mix_change", ratio=volume_ratio))
         low = True
     return reasons, low
+
+
+def _iso(epoch: float) -> str | None:
+    """ISO-8601 UTC for an epoch (None when unknown)."""
+    if not epoch or not math.isfinite(epoch) or epoch <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _last_seen(items: list[_Lost]) -> str | None:
+    """When the fields were last seen: the earliest of the per-field "last seen" times (the loss began then)."""
+    known = [i.last_seen for i in items if i.last_seen > 0]
+    return _iso(min(known)) if known else None
 
 
 def _esc(component: str) -> str:
@@ -717,12 +783,13 @@ def _host_finding(ls: str, host: str, items: list[_Lost], tenant: TenantConfig, 
             "log_source": ls,
             "tier": tenant.tier_for(host),
             "since": since,
+            "last_seen": _last_seen(items),
             "fields": _field_evidence(items),
             "fields_lost": len(items),
             "volume_ratio": round(min(i.volume_ratio for i in items), 4),
             "reproduce": {
                 "filter": {"agent.name": agent, "log_source": ls},
-                "from": since,
+                "from": _last_seen(items) or since,
                 "missing_fields": [i.field for i in items[:20]],
             },
         },
@@ -764,10 +831,15 @@ def _wide_finding(
             "hosts": [Entity("host", h) for h in hosts[:MAX_HOSTS_IN_EVIDENCE]],
             "hosts_affected": len(hosts),
             "since": since,
+            "last_seen": _last_seen(items),
             "fields": _field_evidence(items),
             "fields_lost": len(items),
             "volume_ratio": round(min(i.volume_ratio for i in items), 4),
-            "reproduce": {"filter": {"log_source": ls}, "from": since, "missing_fields": [i.field for i in items[:20]]},
+            "reproduce": {
+                "filter": {"log_source": ls},
+                "from": _last_seen(items) or since,
+                "missing_fields": [i.field for i in items[:20]],
+            },
         },
         recommendation=M("silence.field.rec", log_source=ls),
         confidence=Confidence.LOW if low else Confidence.MEDIUM,
@@ -805,14 +877,16 @@ register(
             "decoder, de reglas o de configuración central más que a un dispositivo concreto.",
         },
         "silence.field.reason": {
-            "en": "{field} was present in {before:.0%} of {events_before} events and only in {after:.0%} of "
-            "{events_after} events since {since}.",
-            "es": "{field} estaba presente en el {before:.0%} de {events_before} eventos y solo en el {after:.0%} de "
-            "{events_after} eventos desde el {since}.",
+            "en": "{field} was present in {before:.0%} of {events_before} events until it vanished on {since} (last "
+            "seen {last_seen}); since then only {after:.0%} of {events_after} events carry it.",
+            "es": "{field} estaba presente en el {before:.0%} de {events_before} eventos hasta que desapareció el "
+            "{since} (última vez visto: {last_seen}); desde entonces solo lo lleva el {after:.0%} de {events_after} "
+            "eventos.",
         },
         "silence.field.reason_hosts": {
-            "en": "{field} vanished since {since} on each of the affected hosts.",
-            "es": "{field} desapareció desde el {since} en cada uno de los equipos afectados.",
+            "en": "{field} vanished on {since} (last seen {last_seen}) on each of the affected hosts.",
+            "es": "{field} desapareció el {since} (última vez visto: {last_seen}) en cada uno de los equipos "
+            "afectados.",
         },
         "silence.field.alerts_only": {
             "en": "Measured on alerts only: field presence depends on which rules fired, so confirm on raw events.",

@@ -32,6 +32,7 @@ from ..i18n import Entity, M, Message, register, render
 
 __all__ = [
     "MAX_FILE_BYTES",
+    "DependentIds",
     "RuleCondition",
     "Ruleset",
     "RulesetError",
@@ -288,6 +289,23 @@ class RuleCondition(NamedTuple):
     text: str
 
 
+class DependentIds(tuple[str, ...]):
+    """Rule ids that correlate on a rule (what :meth:`Ruleset.dependents` returns): a plain tuple of ids, plus
+    ``verified``. ``verified`` is False when no stock rule was loaded (only ``etc/rules`` or a single local file):
+    the stock correlation rules (``if_matched_sid``/``if_matched_group``/frequency, e.g. 5712 or 60204) live in
+    ``ruleset/rules``, so an empty result then means "unknown", never "nothing correlates on it"."""
+
+    verified: bool
+
+    def __new__(cls, ids: Iterable[str] = (), *, verified: bool = True) -> DependentIds:
+        self = super().__new__(cls, ids)
+        self.verified = verified
+        return self
+
+    def __repr__(self) -> str:
+        return f"DependentIds({tuple(self)!r}, verified={self.verified})"
+
+
 @dataclass(slots=True)
 class WazuhRule:
     """One ``<rule>`` as written (``Ruleset.all_rules``) or as effective after overwrites (``Ruleset.rules``).
@@ -377,6 +395,7 @@ class Ruleset:
     _dep_cache: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict, repr=False)
     _child_cache: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
     _desc_cache: dict[tuple[str, int], tuple[str, ...]] = field(default_factory=dict, repr=False)
+    _stock: bool | None = field(default=None, repr=False)
 
     # ---- lookups ---------------------------------------------------------------------------------------------
     def get(self, rule_id: str | int) -> WazuhRule | None:
@@ -394,14 +413,24 @@ class Ruleset:
         """Rule elements from local files (``etc/rules``, ``local_rules*.xml``...), in load order."""
         return [r for r in self.all_rules if r.is_local]
 
-    def dependents(self, rule_id: str | int) -> tuple[str, ...]:
+    @property
+    def has_stock(self) -> bool:
+        """True when at least one stock rule (``ruleset/rules``, ``0095-sshd_rules.xml``...) was loaded. Without
+        them the correlation graph is unknown: the stock correlation rules are not there to be found."""
+        if self._stock is None:
+            self._stock = any(not rule.is_local for rule in self.all_rules)
+        return self._stock
+
+    def dependents(self, rule_id: str | int) -> DependentIds:
         """Rules that correlate on ``rule_id``: ``if_matched_sid`` containing it, ``if_matched_group`` matching
         one of its groups, or frequency rules chained to it via ``if_sid``. Sorted numerically.
 
         Like analysisd, a link only exists when ``rule_id`` loaded BEFORE the correlation rule: the correlation
         lists are wired once, when the correlation rule is loaded (``OS_MarkID``/``OS_MarkGroup``), so a rule
-        loaded later never feeds it even if its groups match."""
-        return tuple(sorted({dep for dep, _ in self.dependents_detail(rule_id)}, key=_id_key))
+        loaded later never feeds it even if its groups match. The result's ``verified`` is False when no stock
+        rule was loaded (:attr:`has_stock`): then the list only holds local correlation rules and is incomplete."""
+        ids = sorted({dep for dep, _ in self.dependents_detail(rule_id)}, key=_id_key)
+        return DependentIds(ids, verified=self.has_stock)
 
     def dependents_detail(self, rule_id: str | int) -> tuple[tuple[str, str], ...]:
         """Like :meth:`dependents` but with the link kind: ``if_matched_sid``, ``if_matched_group`` or
@@ -498,6 +527,7 @@ class Ruleset:
 
     def _invalidate(self) -> None:
         self._index = None
+        self._stock = None
         self._dep_cache.clear()
         self._child_cache.clear()
         self._desc_cache.clear()

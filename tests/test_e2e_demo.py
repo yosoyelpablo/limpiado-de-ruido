@@ -17,11 +17,11 @@ from typing import Any
 import pytest
 
 from hushwatch.config import load_config
-from hushwatch.demo import PlantedScenario, generate, load_demo_agents
+from hushwatch.demo import SCANNER_IP, PlantedScenario, generate, load_demo_agents
 from hushwatch.engine import ALL_ANALYSES, AnalysisOptions, AnalysisOutcome, analyze, open_sources
 from hushwatch.i18n import Entity
 from hushwatch.ingest import open_files
-from hushwatch.models import Event, Finding, get_path, iter_entities
+from hushwatch.models import Event, Finding, fingerprint, get_path, iter_entities
 
 pytestmark = pytest.mark.e2e
 
@@ -157,12 +157,14 @@ def test_no_tune_suggestion_hides_any_planted_attack(run: Run) -> None:
             )
 
 
-@pytest.mark.parametrize("sid", ["a", "b", "c"])
+@pytest.mark.parametrize("sid", ["a", "b", "c", "u"])
 def test_safe_noise_is_found_with_the_right_verdict(run: Run, sid: str) -> None:
     sc = run.manifest.scenario(sid)
     mine = [s for s in run.outcome.suggestions if s.rule_id in sc.rule_ids]
     verdicts = {s.verdict for s in mine}
     assert verdicts & set(sc.allowed_verdicts or [sc.expected_verdict]), (sid, sorted(verdicts))
+    if sc.expected_kinds:
+        assert any(f.kind in sc.expected_kinds and about(f, sc) for f in run.findings), (sid, sc.expected_kinds)
     if sc.review_required is not None and sc.expected_verdict == "tune":
         tuned = [s for s in mine if s.verdict == "tune"]
         assert any(s.review_required == sc.review_required for s in tuned), (sid, [s.dependents for s in tuned])
@@ -184,6 +186,42 @@ def test_planted_problem_is_detected(run: Run, sid: str) -> None:
     sc = run.manifest.scenario(sid)
     hits = [f for f in run.findings if f.kind in sc.expected_kinds and about(f, sc)]
     assert hits, (sid, sc.expected_kinds, sorted({(f.kind, f.subject) for f in run.findings if about(f, sc)}))
+
+
+def test_the_clean_analyst_facing_candidate_is_tuned_without_review(run: Run) -> None:
+    """Scenario u is the demo's showcase: analyst-facing, no correlation rule depends on it, FP evidence."""
+    sc = run.manifest.scenario("u")
+    tuned = [s for s in run.outcome.suggestions if s.rule_id in sc.rule_ids and s.verdict == "tune"]
+    assert tuned and all(not s.review_required for s in tuned), [(s.conditions, s.dependents) for s in tuned]
+    assert all(dict((c.field, c.value) for c in s.conditions).get("data.srcip") == SCANNER_IP for s in tuned)
+
+
+def test_one_incident_is_one_finding(run: Run) -> None:
+    """Cross-domain duplicates are folded into the finding with the most specific cause (listed as related)."""
+    tenant = run.outcome.report.tenant
+    by_fp = {f.fingerprint: f for f in run.findings}
+    folded = (
+        # dc02: tampering explains "agent alive but no data" and the sparse-channel note
+        ("silence.tampering", "agent:dc02", "pipeline.agent_no_data", "agent:dc02"),
+        ("silence.tampering", "agent:dc02", "silence.unmonitorable", "agent:dc02"),
+        # srv-legacy-01: the disconnection is the cause of the silence
+        ("pipeline.agent_disconnected", "agent:srv-legacy-01", "silence.silent", "agent:srv-legacy-01"),
+    )
+    for kind, subject, gone_kind, gone_subject in folded:
+        keeper = next((f for f in run.findings if f.kind == kind and f.subject == subject), None)
+        assert keeper is not None, (kind, subject)
+        gone = fingerprint(tenant, gone_kind, gone_subject)
+        assert gone not in by_fp, (gone_kind, gone_subject)
+        assert gone in keeper.related, (kind, subject, gone_kind)
+        assert keeper.evidence.get("explained"), (kind, subject)
+    # srv-backup-01: Sysmon stopped is silence (it was seen and stopped), not a second coverage finding
+    sysmon = next(f for f in run.findings if f.kind == "silence.silent" and "srv-backup-01" in f.subject)
+    contract = fingerprint(
+        tenant,
+        "coverage.missing_source",
+        "contract:windows servers|ls:Microsoft-Windows-Sysmon/Operational|state:silent|tier:standard",
+    )
+    assert contract not in by_fp and contract in sysmon.related
 
 
 def test_controls_are_left_alone(run: Run) -> None:

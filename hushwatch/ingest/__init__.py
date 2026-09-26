@@ -2,8 +2,10 @@
 
 Every source exposes a :class:`~hushwatch.models.DataBasis` (``source.basis``) describing what the analysis
 could actually see: input kind, profile, time range, reference "now", event count, malformed lines,
-bad / future timestamps, truncation and partial failures. Sources are re-iterable: the noise backtest reads the
-input a second time and must see exactly the same events.
+bad / future timestamps, events outside ``--since``/``--until`` (``excluded_by_window``), files left out of input
+directories (``skipped_files``), truncation and partial failures (translatable messages). Sources are re-iterable:
+the noise backtest reads the input a second time and must see exactly the same events. File sources also offer
+``iter_rules(rule_ids)``, the same events restricted to a few rules and read cheaply (raw lines pre-filtered).
 
 This package module stays light: indexer and Wazuh API clients live in their own modules and are imported by
 their callers.
@@ -18,7 +20,7 @@ from typing import Protocol, runtime_checkable
 
 from ..config import InputConfig, TenantConfig
 from ..models import DataBasis, Event
-from .files import FileEventSource, IngestError, ReadStats, iter_documents, rotated_date
+from .files import FileEventSource, IngestError, ReadStats, iter_documents, rotated_date, rule_line_filter
 from .profiles import PROFILES, detect_profile, normalize
 
 __all__ = [
@@ -32,6 +34,7 @@ __all__ = [
     "normalize",
     "open_files",
     "rotated_date",
+    "rule_line_filter",
 ]
 
 

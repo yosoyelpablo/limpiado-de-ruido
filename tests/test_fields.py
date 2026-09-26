@@ -115,7 +115,14 @@ def test_mid_day_transition_and_intermittent_fields() -> None:
     assert len(findings) == 1
     fields = {item["field"]: item for item in findings[0].evidence["fields"]}
     assert set(fields) == {"data.srcip", "data.srcport"}  # data.flag is 90% present: below the 95% threshold
-    assert fields["data.srcip"]["since"] == (START + timedelta(days=11)).date().isoformat()
+    # the field vanished mid-day on day 10: that is the date of the loss (not the next day), and the finding says
+    # exactly when the field was last seen (the last event before the cut)
+    assert fields["data.srcip"]["since"] == (START + timedelta(days=10)).date().isoformat()
+    last_seen = datetime.fromisoformat(fields["data.srcip"]["last_seen"].replace("Z", "+00:00"))
+    assert cut - timedelta(minutes=5) <= last_seen < cut
+    assert findings[0].evidence["last_seen"] == fields["data.srcip"]["last_seen"]
+    assert findings[0].evidence["reproduce"]["from"] == fields["data.srcip"]["last_seen"]
+    assert "last seen 2026-08-13T12:5" in render(findings[0].reasons[0], "en")
 
 
 def test_empty_values_count_as_absent_and_fast_path_matches_is_empty() -> None:

@@ -1,11 +1,20 @@
 """Configuration: one YAML file, ``defaults`` inherited by N ``tenants`` (MSSP-ready).
 
 Secrets are never accepted on the command line. In YAML they are written as ``${ENV_VAR}`` references and
-expanded at load time; a missing variable is an error that names the variable, never its value.
+expanded at load time. A missing variable only blocks the tenant(s) that use it: :meth:`Config.tenant` raises an
+error that names the variable (never a value), so one customer's unset secret never stops the others.
+
+Relative paths in the file (``inputs[].path``, ``ruleset_dirs``, ``dispositions``, ``state_dir``, ``ca_cert``,
+``agents_file``) are resolved against the directory of the config file, not the current directory, so a cron
+job and an interactive shell see the same files.
+
+The YAML is parsed with a safe loader that refuses aliases (``*name``): a few hundred bytes of nested aliases
+expand to gigabytes. Errors quote the line and column, never the offending text (it may hold a secret).
 """
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import functools
 import ipaddress
@@ -13,7 +22,7 @@ import os
 import re
 import stat
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -29,6 +38,26 @@ CONFIG_ENV = "HUSHWATCH_CONFIG"
 DEFAULT_STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "hushwatch"
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+CRITICALITY_TIERS: tuple[str, ...] = ("critical", "standard", "low")
+# canonical entity names accepted as trusted_entities keys (dotted source paths such as data.srcip are accepted too)
+TRUSTED_ENTITY_NAMES: tuple[str, ...] = (
+    "user",
+    "src_ip",
+    "srcip",
+    "dst_ip",
+    "dstip",
+    "host",
+    "agent",
+    "process",
+    "parent_process",
+    "command_line",
+    "file",
+    "url",
+    "domain",
+)
+# keys whose literal (non-${ENV}) string values are credentials
+_SECRET_KEYS = frozenset({"password", "api_key", "token", "secret"})
 
 # MITRE ATT&CK tactics (names and shortnames, v18/v19) where tuning needs explicit evidence (dispositions).
 DEFAULT_SENSITIVE_TACTICS: tuple[str, ...] = (
@@ -75,6 +104,8 @@ class NoiseSettings:
     min_dispositions: int = 10  # before an FP-rate lower bound is used
     disposition_confidence: float = 0.95
     top_rules: int = 25
+    min_noisy_alerts: int = 50  # a rule is called "noisy" only with at least this many alerts...
+    min_noisy_per_day: float = 5.0  # ...and this many per day
     max_candidates_per_rule: int = 5
     heavy_hitters: int = 64  # Space-Saving capacity per (rule, field)
     sensitive_tactics: tuple[str, ...] = DEFAULT_SENSITIVE_TACTICS
@@ -185,6 +216,7 @@ class TenantConfig:
     ruleset_dirs: list[str] = field(default_factory=list)
     suppression_id_range: tuple[int, int] = (100100, 119999)
     dispositions: str | None = None
+    agents_file: str | None = None  # JSON export of the Wazuh API ``GET /agents`` (agent inventory without the API)
     notify: list[NotifyConfig] = field(default_factory=list)
     state_dir: str | None = None
     noise: NoiseSettings = field(default_factory=NoiseSettings)
@@ -242,18 +274,53 @@ class TenantConfig:
 
 @dataclass(slots=True)
 class Config:
+    """A loaded configuration.
+
+    ``missing_env`` maps a tenant to the ``(variable, where)`` pairs its settings reference but the environment
+    does not define; :meth:`tenant` refuses such a tenant (the placeholders are never used as values).
+    ``literal_secrets`` lists where the file holds credentials written literally instead of ``${ENV_VAR}``.
+    """
+
     tenants: dict[str, TenantConfig]
     path: Path | None = None
+    missing_env: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    literal_secrets: list[str] = field(default_factory=list)
 
     def tenant(self, name: str | None = None) -> TenantConfig:
+        """The tenant ``name`` (the only one when ``name`` is None), ready to use."""
         if name is None:
             if len(self.tenants) == 1:
-                return next(iter(self.tenants.values()))
-            raise ConfigError(f"several tenants configured, choose one with --tenant: {', '.join(self.tenants)}")
-        try:
-            return self.tenants[name]
-        except KeyError:
-            raise ConfigError(f"unknown tenant {name!r}; configured: {', '.join(self.tenants)}") from None
+                name = next(iter(self.tenants))
+            else:
+                raise ConfigError(f"several tenants configured, choose one with --tenant: {', '.join(self.tenants)}")
+        if name not in self.tenants:
+            hint = _did_you_mean(name, list(self.tenants))
+            raise ConfigError(f"unknown tenant {name!r}{hint}; configured: {', '.join(self.tenants)}")
+        error = self.env_error(name)
+        if error is not None:
+            raise error
+        return self.tenants[name]
+
+    def select(self, name: str | None = None) -> list[str]:
+        """Tenant names to process: ``[name]`` (validated) or every configured tenant."""
+        if name is None:
+            return list(self.tenants)
+        if name not in self.tenants:
+            hint = _did_you_mean(name, list(self.tenants))
+            raise ConfigError(f"unknown tenant {name!r}{hint}; configured: {', '.join(self.tenants)}")
+        return [name]
+
+    def env_error(self, name: str) -> ConfigError | None:
+        """The error for a tenant whose settings reference unset environment variables (None when usable)."""
+        missing = self.missing_env.get(name)
+        if not missing:
+            return None
+        variables = sorted({var for var, _ in missing})
+        places = ", ".join(sorted({where for _, where in missing})[:5])
+        return ConfigError(
+            f"tenant {name}: environment variable(s) {', '.join(variables)} not set (used in {places}); "
+            f"export them before running hushwatch"
+        )
 
 
 _TRUST_GROUPS: tuple[frozenset[str], ...] = (
@@ -290,6 +357,60 @@ def _networks(nets: tuple[str, ...]) -> tuple[ipaddress.IPv4Network | ipaddress.
 
 # ---- loading -------------------------------------------------------------------------------------------------
 
+# where each path-like setting lives, for resolution against the config file's directory
+_PATH_FIELDS: tuple[str, ...] = ("dispositions", "state_dir", "agents_file")
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` that refuses aliases: nested aliases ("billion laughs") expand exponentially."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent):
+            event = self.peek_event()  # type: ignore[no-untyped-call]
+            raise yaml.composer.ComposerError(None, None, _ALIAS_PROBLEM, event.start_mark)
+        return super().compose_node(parent, index)
+
+
+_ALIAS_PROBLEM = "YAML aliases (*name) are not supported; put shared settings under defaults"
+
+
+class YamlError(ConfigError):
+    """Unparseable YAML. ``detail`` names the position and the problem, never the offending text."""
+
+    def __init__(self, source: str, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"invalid YAML in {source}: {detail}")
+
+
+def safe_yaml_load(text: str, *, source: str = "config") -> Any:
+    """Parse YAML text safely (no aliases, no Python tags). Errors name only the position, never the text."""
+    try:
+        return yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - _StrictLoader is a SafeLoader subclass
+    except yaml.YAMLError as exc:
+        position = _yaml_position(exc)
+        raise YamlError(source, f"{position}: {_yaml_problem(exc)}" if position else _yaml_problem(exc)) from None
+    except (ValueError, TypeError, OverflowError, RecursionError) as exc:  # e.g. an impossible date 2026-13-40
+        problem = _CONTROL.sub(" ", re.sub(r"'[^']*'|\"[^\"]*\"", "'…'", str(exc)))[:120]
+        raise YamlError(source, f"{type(exc).__name__}: {problem}" if problem else type(exc).__name__) from None
+
+
+def _yaml_position(exc: yaml.YAMLError) -> str:
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    line, column = getattr(mark, "line", None), getattr(mark, "column", None)
+    if isinstance(line, int) and isinstance(column, int):
+        return f"line {line + 1}, column {column + 1}"
+    return ""
+
+
+def _yaml_problem(exc: yaml.YAMLError) -> str:
+    """PyYAML's problem description with any quoted text removed (it may quote part of a secret)."""
+    problem = str(getattr(exc, "problem", None) or "syntax error")
+    problem = re.sub(r"'[^']*'|\"[^\"]*\"|`[^`]*`", "'…'", problem)
+    return _CONTROL.sub(" ", problem)[:160]
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
 
 def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None) -> Config:
     """Load ``path`` (or ``$HUSHWATCH_CONFIG``). Returns a single ``default`` tenant when no file is given."""
@@ -302,67 +423,205 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     try:
         text = cfg_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"cannot read config {cfg_path}: {exc.strerror}") from None
-    _warn_if_exposed(cfg_path, text)
-    try:
-        raw = yaml.safe_load(text) or {}
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in {cfg_path}: {exc}") from None
+        raise ConfigError(f"cannot read config {cfg_path}: {exc.strerror or type(exc).__name__}") from None
+    except UnicodeDecodeError:
+        raise ConfigError(f"cannot read config {cfg_path}: not UTF-8 text") from None
+    raw = safe_yaml_load(text, source=str(cfg_path)) or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{cfg_path}: top level must be a mapping")
-    return parse_config(raw, env, cfg_path)
+    cfg = parse_config(raw, env, cfg_path)
+    _warn_if_exposed(cfg_path, cfg.literal_secrets)
+    return cfg
 
 
 def parse_config(raw: Mapping[str, Any], environ: Mapping[str, str], path: Path | None = None) -> Config:
-    unknown = set(raw) - {"defaults", "tenants"}
-    if unknown:
-        raise ConfigError(f"unknown top-level keys: {', '.join(sorted(unknown))} (expected defaults, tenants)")
+    """Validate and build every tenant of a parsed config. Every structural problem is reported at once."""
+    problems: list[str] = []
+    for key in raw:
+        if key not in ("defaults", "tenants"):
+            problems.append(f"unknown top-level key {key!r}{_did_you_mean(str(key), ['defaults', 'tenants'])}")
     defaults = raw.get("defaults") or {}
     tenants_raw = raw.get("tenants") or {"default": {}}
-    if not isinstance(defaults, dict) or not isinstance(tenants_raw, dict):
+    if not isinstance(defaults, Mapping) or not isinstance(tenants_raw, Mapping):
         raise ConfigError("'defaults' and 'tenants' must be mappings")
-    tenants: dict[str, TenantConfig] = {}
+    _check_keys(TenantConfig, defaults, "defaults", problems)
     for name, body in tenants_raw.items():
+        if body is not None and not isinstance(body, Mapping):
+            problems.append(f"tenants.{name}: expected a mapping")
+            continue
+        _check_keys(TenantConfig, body or {}, f"tenants.{name}", problems)
+    if problems:
+        raise ConfigError(_join(problems))
+
+    base = path.expanduser().absolute().parent if path is not None else None
+    literal = _literal_secrets(raw)
+    tenants: dict[str, TenantConfig] = {}
+    missing_env: dict[str, list[tuple[str, str]]] = {}
+    for name, body in tenants_raw.items():
+        where = f"tenants.{name}"
         merged = _deep_merge(defaults, body or {})
-        merged = _expand_env(merged, environ, f"tenants.{name}")
+        missing: list[tuple[str, str]] = []
+        merged = _expand_env(merged, environ, where, missing)
         merged["name"] = str(name)
-        tenants[str(name)] = _build(TenantConfig, merged, f"tenants.{name}")
-        _validate_tenant(tenants[str(name)])
-    return Config(tenants=tenants, path=path)
+        local: list[str] = []
+        tenant = _build(TenantConfig, merged, where, local)
+        if tenant is not None and not local:
+            _validate_tenant(tenant, local)
+        problems.extend(_attribute(p, where, body or {}, defaults) for p in local)
+        if tenant is None or local:
+            continue
+        if base is not None:
+            _resolve_paths(tenant, base)
+        tenants[str(name)] = tenant
+        if missing:
+            missing_env[str(name)] = missing
+    if problems:
+        raise ConfigError(_join(problems))
+    return Config(tenants=tenants, path=path, missing_env=missing_env, literal_secrets=literal)
 
 
-def _validate_tenant(tenant: TenantConfig) -> None:
+def _join(problems: Sequence[str]) -> str:
+    unique = list(dict.fromkeys(problems))
+    if len(unique) == 1:
+        return unique[0]
+    return f"{len(unique)} problems in the configuration:\n" + "\n".join(f"  - {p}" for p in unique)
+
+
+def _did_you_mean(value: str, choices: Sequence[str]) -> str:
+    close = difflib.get_close_matches(value, list(choices), n=1, cutoff=0.6)
+    return f" (did you mean {close[0]!r}?)" if close else ""
+
+
+def _attribute(problem: str, where: str, body: Mapping[str, Any], defaults: Mapping[str, Any]) -> str:
+    """Rewrite ``tenants.x.a.b: ...`` as ``defaults.a.b: ...`` when the offending value came from ``defaults``."""
+    if not problem.startswith(where + "."):
+        return problem
+    rest = problem[len(where) + 1 :]
+    parts = re.split(r"[.\[:]", rest, maxsplit=2)
+    first = parts[0]
+    second = parts[1] if len(parts) > 1 else None
+    in_body = first in body
+    if (
+        in_body
+        and second is not None
+        and isinstance(body.get(first), Mapping)
+        and isinstance(defaults.get(first), Mapping)
+    ):
+        in_body = second in body[first] or second not in defaults[first]
+    if not in_body and first in defaults:
+        return "defaults." + rest
+    return problem
+
+
+def _check_keys(cls: type[Any], data: Any, where: str, problems: list[str]) -> None:
+    """Report unknown keys (with a did-you-mean hint) in ``data`` and its nested settings, at their real path."""
+    if not isinstance(data, Mapping):
+        return
+    hints = get_type_hints(cls)
+    names = [f.name for f in fields(cls)]
+    for key, value in data.items():
+        if key not in names:
+            problems.append(f"{where}: unknown key {key!r}{_did_you_mean(str(key), names)}")
+            continue
+        inner, is_list = _dataclass_of(hints[key])
+        if inner is None:
+            continue
+        if is_list and isinstance(value, list):
+            for i, item in enumerate(value):
+                _check_keys(inner, item, f"{where}.{key}[{i}]", problems)
+        elif not is_list:
+            _check_keys(inner, value, f"{where}.{key}", problems)
+
+
+def _dataclass_of(hint: Any) -> tuple[type[Any] | None, bool]:
+    origin = get_origin(hint)
+    args = [a for a in get_args(hint) if a is not type(None)]
+    if origin in (Union, UnionType) and len(args) == 1:
+        return _dataclass_of(args[0])
+    if origin is list and args and isinstance(args[0], type) and is_dataclass(args[0]):
+        return args[0], True
+    if isinstance(hint, type) and is_dataclass(hint):
+        return hint, False
+    return None, False
+
+
+def _validate_tenant(tenant: TenantConfig, problems: list[str]) -> None:
+    where = f"tenants.{tenant.name}"
     for tier, default in DEFAULT_SLA.items():  # a partial `sla:` override keeps the other tiers' defaults
         tenant.sla.setdefault(tier, default)
-    unknown_tiers = set(tenant.sla) - set(DEFAULT_SLA)
-    if unknown_tiers:
-        raise ConfigError(f"tenant {tenant.name}: unknown sla tier(s) {', '.join(sorted(unknown_tiers))}")
+    for tier in sorted(set(tenant.sla) - set(DEFAULT_SLA)):
+        problems.append(f"{where}.sla: unknown sla tier {tier!r}{_did_you_mean(tier, CRITICALITY_TIERS)}")
+    for tier in sorted(set(tenant.criticality) - set(CRITICALITY_TIERS)):
+        problems.append(
+            f"{where}.criticality: unknown tier {tier!r}{_did_you_mean(tier, CRITICALITY_TIERS)} "
+            f"(tiers: {', '.join(CRITICALITY_TIERS)})"
+        )
+    for key in sorted(tenant.trusted_entities):
+        if "." not in key and key not in TRUSTED_ENTITY_NAMES:
+            warnings.warn(
+                f"{where}.trusted_entities: {key!r} is not a known field{_did_you_mean(key, TRUSTED_ENTITY_NAMES)}; "
+                f"use a canonical name ({', '.join(TRUSTED_ENTITY_NAMES[:6])}...) or a dotted source path such as "
+                f"data.srcip; entries under it will never match",
+                stacklevel=2,
+            )
     try:
         ZoneInfo(tenant.timezone)
     except (ZoneInfoNotFoundError, ValueError):
-        raise ConfigError(f"tenant {tenant.name}: unknown timezone {tenant.timezone!r} (use IANA names)") from None
+        problems.append(f"{where}.timezone: unknown timezone {tenant.timezone!r} (use IANA names)")
     for net in tenant.internal_networks:
         try:
             ipaddress.ip_network(net, strict=False)
         except ValueError:
-            raise ConfigError(f"tenant {tenant.name}: invalid network {net!r}") from None
+            problems.append(f"{where}.internal_networks: invalid network {net!r}")
     low, high = tenant.suppression_id_range
     if not (100000 <= low <= high <= 120000):
-        raise ConfigError(f"tenant {tenant.name}: suppression_id_range must be inside 100000-120000")
-    for item in tenant.inputs:
+        problems.append(f"{where}.suppression_id_range: must be inside 100000-120000")
+    for i, item in enumerate(tenant.inputs):
+        at = f"{where}.inputs[{i}]"
         if item.type not in ("file", "indexer"):
-            raise ConfigError(f"tenant {tenant.name}: input type must be file or indexer, got {item.type!r}")
+            problems.append(f"{at}: input type must be file or indexer, got {item.type!r}")
         if item.type == "file" and not item.path:
-            raise ConfigError(f"tenant {tenant.name}: file input needs 'path'")
+            problems.append(f"{at}: file input needs 'path'")
         if item.type == "indexer" and not item.url:
-            raise ConfigError(f"tenant {tenant.name}: indexer input needs 'url'")
+            problems.append(f"{at}: indexer input needs 'url'")
         if item.url and item.url.startswith("http://") and (item.password or item.api_key):
-            warnings.warn(f"tenant {tenant.name}: credentials sent over plain http to {item.url}", stacklevel=2)
-    for n in tenant.notify:
+            warnings.warn(f"{at}: credentials sent over plain http to {_origin(item.url)}", stacklevel=2)
+    api = tenant.wazuh_api
+    if api is not None and api.url.startswith("http://") and (api.password or api.username):
+        warnings.warn(f"{where}.wazuh_api: credentials sent over plain http to {_origin(api.url)}", stacklevel=2)
+    for i, n in enumerate(tenant.notify):
+        at = f"{where}.notify[{i}]"
         if n.type not in ("webhook", "slack"):
-            raise ConfigError(f"tenant {tenant.name}: notify type must be webhook or slack")
+            problems.append(f"{at}: notify type must be webhook or slack")
         if n.min_severity not in ("info", "low", "medium", "high", "critical"):
-            raise ConfigError(f"tenant {tenant.name}: notify min_severity must be info|low|medium|high|critical")
+            problems.append(f"{at}: notify min_severity must be info|low|medium|high|critical")
+
+
+def _origin(url: str) -> str:
+    """``scheme://host[:port]`` of a URL (never its user info, path or query)."""
+    match = re.match(r"(?i)^([a-z][a-z0-9+.-]*://)(?:[^@/?#]*@)?([^/?#]*)", url.strip())
+    return (match.group(1) + match.group(2)) if match else "?"
+
+
+def _resolve_paths(tenant: TenantConfig, base: Path) -> None:
+    """Make relative paths absolute against ``base`` (the config file's directory)."""
+    for name in _PATH_FIELDS:
+        setattr(tenant, name, _resolve(getattr(tenant, name), base))
+    tenant.ruleset_dirs = [_resolve(p, base) or p for p in tenant.ruleset_dirs]
+    for item in tenant.inputs:
+        item.path = _resolve(item.path, base)
+        item.ca_cert = _resolve(item.ca_cert, base)
+    if tenant.wazuh_api is not None:
+        tenant.wazuh_api.ca_cert = _resolve(tenant.wazuh_api.ca_cert, base)
+
+
+def _resolve(value: str | None, base: Path) -> str | None:
+    if not value or "${" in value:  # unset environment variable: the tenant is unusable anyway
+        return value
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.normpath(os.path.join(str(base), expanded))
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -375,7 +634,9 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     return out
 
 
-def _expand_env(value: Any, environ: Mapping[str, str], where: str) -> Any:
+def _expand_env(value: Any, environ: Mapping[str, str], where: str, missing: list[tuple[str, str]]) -> Any:
+    """Expand ``${VAR}`` / ``${VAR:-default}``. An unset variable is recorded in ``missing`` (with its setting's
+    path) and left as the literal ``${VAR}`` placeholder: the tenant is refused later, only if it is used."""
     if isinstance(value, str):
 
         def repl(match: re.Match[str]) -> str:
@@ -384,35 +645,56 @@ def _expand_env(value: Any, environ: Mapping[str, str], where: str) -> Any:
                 return environ[var]
             if default is not None:
                 return default
-            raise ConfigError(f"{where}: environment variable {var} is not set")
+            missing.append((var, where))
+            return match.group(0)
 
         return _ENV_REF.sub(repl, value)
     if isinstance(value, list):
-        return [_expand_env(v, environ, where) for v in value]
+        return [_expand_env(v, environ, f"{where}[{i}]", missing) for i, v in enumerate(value)]
     if isinstance(value, Mapping):
-        return {k: _expand_env(v, environ, f"{where}.{k}") for k, v in value.items()}
+        return {k: _expand_env(v, environ, f"{where}.{k}", missing) for k, v in value.items()}
     return value
 
 
 T = TypeVar("T")
 
 
-def _build(cls: type[T], data: Any, where: str) -> T:
+def _build(cls: type[T], data: Any, where: str, problems: list[str]) -> T | None:
+    """Build dataclass ``cls`` from ``data``; problems are appended (every field is checked) and None returned."""
     if not isinstance(data, Mapping):
-        raise ConfigError(f"{where}: expected a mapping")
+        problems.append(f"{where}: expected a mapping")
+        return None
     hints = get_type_hints(cls)
-    names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
-    unknown = set(data) - names
-    if unknown:
-        raise ConfigError(f"{where}: unknown keys {', '.join(sorted(map(str, unknown)))}")
-    kwargs = {key: _coerce(hints[key], value, f"{where}.{key}") for key, value in data.items()}
+    names = [f.name for f in fields(cls)]  # type: ignore[arg-type]
+    before = len(problems)
+    kwargs: dict[str, Any] = {}
+    for key, value in data.items():
+        if key not in names:
+            problems.append(f"{where}: unknown key {key!r}{_did_you_mean(str(key), names)}")
+            continue
+        try:
+            kwargs[key] = _coerce(hints[key], value, f"{where}.{key}", problems)
+        except _Reported:
+            continue
+        except ConfigError as exc:
+            problems.append(str(exc))
+    if len(problems) > before:
+        return None
     try:
         return cls(**kwargs)
     except TypeError as exc:
-        raise ConfigError(f"{where}: {exc}") from None
+        problems.append(f"{where}: {_missing_argument(exc)}")
+        return None
 
 
-def _coerce(hint: Any, value: Any, where: str) -> Any:
+def _missing_argument(exc: TypeError) -> str:
+    match = re.search(r"missing \d+ required (?:positional |keyword-only )?arguments?: (.+)$", str(exc))
+    if match:
+        return "missing required key(s) " + match.group(1).replace("'", "")
+    return "invalid settings"
+
+
+def _coerce(hint: Any, value: Any, where: str, problems: list[str]) -> Any:
     origin = get_origin(hint)
     args: tuple[Any, ...] = tuple(get_args(hint))
     if value is None:
@@ -421,7 +703,7 @@ def _coerce(hint: Any, value: Any, where: str) -> Any:
         inner = [a for a in args if a is not type(None)]
         if len(inner) != 1:
             raise ConfigError(f"{where}: unsupported type")
-        return _coerce(inner[0], value, where)
+        return _coerce(inner[0], value, where, problems)
     if hint is timedelta:
         try:
             return parse_duration(value)
@@ -433,25 +715,42 @@ def _coerce(hint: Any, value: Any, where: str) -> Any:
         try:
             return date.fromisoformat(str(value))
         except ValueError:
-            raise ConfigError(f"{where}: invalid date {value!r} (YYYY-MM-DD)") from None
+            raise ConfigError(f"{where}: invalid date (YYYY-MM-DD)") from None
     if is_dataclass(hint):
-        return _build(hint, value, where)  # type: ignore[arg-type]
+        built = _build(hint, value, where, problems)  # type: ignore[arg-type]
+        if built is None:
+            raise _Reported()
+        return built
     if origin is list:
         if not isinstance(value, list):
             raise ConfigError(f"{where}: expected a list")
-        return [_coerce(args[0], v, f"{where}[{i}]") for i, v in enumerate(value)] if args else list(value)
+        if not args:
+            return list(value)
+        out = []
+        failed = False
+        for i, v in enumerate(value):
+            try:
+                out.append(_coerce(args[0], v, f"{where}[{i}]", problems))
+            except _Reported:
+                failed = True
+            except ConfigError as exc:
+                problems.append(str(exc))
+                failed = True
+        if failed:
+            raise _Reported()
+        return out
     if origin is tuple:
         if not isinstance(value, (list, tuple)):
             raise ConfigError(f"{where}: expected a list")
         if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(_coerce(args[0], v, where) for v in value)
+            return tuple(_coerce(args[0], v, f"{where}[{i}]", problems) for i, v in enumerate(value))
         if len(value) != len(args):
             raise ConfigError(f"{where}: expected {len(args)} items")
-        return tuple(_coerce(a, v, where) for a, v in zip(args, value, strict=True))
+        return tuple(_coerce(a, v, f"{where}[{i}]", problems) for i, (a, v) in enumerate(zip(args, value, strict=True)))
     if origin is dict:
         if not isinstance(value, Mapping):
             raise ConfigError(f"{where}: expected a mapping")
-        return {str(k): _coerce(args[1], v, f"{where}.{k}") if args else v for k, v in value.items()}
+        return {str(k): _coerce(args[1], v, f"{where}.{k}", problems) if args else v for k, v in value.items()}
     if hint is bool:
         if not isinstance(value, bool):
             raise ConfigError(f"{where}: expected true/false")
@@ -467,16 +766,78 @@ def _coerce(hint: Any, value: Any, where: str) -> Any:
     return value
 
 
-def _warn_if_exposed(path: Path, text: str) -> None:
-    """Warn when a config holding literal secrets is readable by group/others."""
+class _Reported(ConfigError):
+    """A nested problem already appended to the problem list (nothing more to add)."""
+
+    def __init__(self) -> None:
+        super().__init__("")
+
+
+def _literal_secrets(raw: Mapping[str, Any]) -> list[str]:
+    """Where the RAW (unexpanded) config holds literal credentials: secret keys, header values, and webhook URLs
+    that carry a secret (Slack webhooks, tokens in the query or user info, long random path segments).
+
+    Works on the parsed tree, so block style, flow mappings (``{password: x}``) and quoting all look the same; a
+    value that references ``${VAR}`` is not literal."""
+    found: list[str] = []
+
+    def literal(value: Any) -> bool:
+        return (
+            isinstance(value, (str, int, float))
+            and not isinstance(value, bool)
+            and "${" not in str(value)
+            and bool(str(value).strip())
+        )
+
+    def walk(node: Any, where: str, key: str | None, parent: Any) -> None:
+        if isinstance(node, Mapping):
+            for k, v in node.items():
+                walk(v, f"{where}.{k}" if where else str(k), str(k), node)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{where}[{i}]", key, parent)
+        elif key is not None and literal(node):
+            in_headers = where.rsplit(".", 2)[-2:-1] == ["headers"]
+            if (
+                key.lower() in _SECRET_KEYS
+                or in_headers
+                or (
+                    key == "url"
+                    and "notify[" in where
+                    and isinstance(parent, Mapping)
+                    and _secret_url(str(node), str(parent.get("type") or "webhook"))
+                )
+            ):
+                found.append(where)
+
+    walk(raw, "", None, None)
+    return found
+
+
+_TOKEN_SEGMENT = re.compile(r"[A-Za-z0-9_-]{20,}")
+
+
+def _secret_url(url: str, kind: str) -> bool:
+    """A webhook URL that is itself a credential: Slack incoming webhooks, or a token in it."""
+    if kind == "slack" or "hooks.slack.com" in url:
+        return True
+    rest = url.split("://", 1)[-1]
+    authority, _, path = rest.partition("/")
+    return "@" in authority or "?" in url or any(_TOKEN_SEGMENT.fullmatch(seg) for seg in path.split("/"))
+
+
+def _warn_if_exposed(path: Path, literal: Sequence[str]) -> None:
+    """Warn when a config holding literal credentials is readable by group/others."""
+    if not literal:
+        return
     try:
         mode = path.stat().st_mode
     except OSError:
         return
-    literal_secret = re.search(r"(?im)^\s*(password|api_key)\s*:\s*(?!\$\{)\S+", text)
-    if literal_secret and mode & (stat.S_IRGRP | stat.S_IROTH):
+    if mode & (stat.S_IRGRP | stat.S_IROTH):
+        shown = ", ".join(literal[:5]) + (f" (+{len(literal) - 5} more)" if len(literal) > 5 else "")
         warnings.warn(
-            f"{path} contains literal credentials and is readable by other users; use ${{ENV_VAR}} "
+            f"{path} contains literal credentials ({shown}) and is readable by other users; use ${{ENV_VAR}} "
             f"references or chmod 600",
             stacklevel=3,
         )

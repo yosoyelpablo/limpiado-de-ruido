@@ -183,15 +183,18 @@ def test_attempted_usernames_are_not_actors() -> None:
 
 def test_beacon_addresses_downgrade() -> None:
     tenant = TenantConfig()
-    watch = BacktestWatch(beacons={"5710": frozenset({"198.51.100.77"})})
     events = [_event(i, extra={"data.dstip": "198.51.100.77" if i % 2 else "10.0.0.1"}) for i in range(10)]
-    stats = run_backtest(
-        [_suggestion("5710", ("agent.name", "srv-app-01.corp.example"))],
-        events,
-        tenant=tenant,
-        dispositions=None,
-        watch=watch,
-    )["s1"]
+    suggestion = _suggestion("5710", ("agent.name", "srv-app-01.corp.example"))
+    # a public address with sustained activity that is not a steady outbound beacon still blocks tuning...
+    watch = BacktestWatch(beacons={"5710": frozenset({"198.51.100.77"})})
+    stats = run_backtest([suggestion], events, tenant=tenant, dispositions=None, watch=watch)["s1"]
+    assert stats.beacon_hits == 0 and stats.sustained_hits == 5 and stats.sustained_values == ["198.51.100.77"]
+    assert [m.key for m in downgrade_reasons(stats, tenant=tenant)] == ["noise.backtest.sustained"]
+    # ...and is called beaconing only when pass 1 found it periodic (outbound, steady interval)
+    periodic = BacktestWatch(
+        beacons={"5710": frozenset({"198.51.100.77"})}, periodic={"5710": frozenset({"198.51.100.77"})}
+    )
+    stats = run_backtest([suggestion], events, tenant=tenant, dispositions=None, watch=periodic)["s1"]
     assert stats.beacon_hits == 5 and stats.beacon_values == ["198.51.100.77"]
     assert [m.key for m in downgrade_reasons(stats, tenant=tenant)] == ["noise.backtest.beacon"]
 

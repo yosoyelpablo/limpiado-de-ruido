@@ -381,6 +381,8 @@ def _clamp_level(number: float) -> int:
 
 def _level(value: Any) -> int | None:
     """Wazuh-scale level (0-16) from a number, a numeric string or a severity name."""
+    if type(value) is int:  # every Wazuh alert: rule.level is a JSON integer
+        return 0 if value < 0 else 16 if value > 16 else value
     if isinstance(value, str) and value.strip().lower() in _SEVERITY_NAMES:
         return _SEVERITY_NAMES[value.strip().lower()]
     number = _number(value)
@@ -481,7 +483,9 @@ def _platform_from_log_source(log_source: str | None) -> str | None:
     return None
 
 
+@functools.lru_cache(maxsize=4096)
 def _is_ip(text: str) -> bool:
+    """Whether ``text`` is an IP address (cached: syslog sender locations repeat on every event)."""
     if len(text) > 45:
         return False
     try:
@@ -1420,6 +1424,19 @@ def _bind(
             return None
         event.fields = fast_flatten(body) if project is None else _project(d, project, values)
         return event
+
+    if profile == "wazuh4" and project is None:
+        # Hot path (every Wazuh alert, full fields): the flattened document already holds every dotted path the
+        # mapper reads, so it is the mapper's input too (no separate trie walk). Same values as the extractor for
+        # Wazuh 4 documents, whose extracted paths never run through lists of objects.
+        def run_flat(doc: Mapping[str, Any]) -> Event | None:
+            flat = fast_flatten(_body(doc))
+            event = mapper(flat, ctx)
+            if event is not None:
+                event.fields = flat
+            return event
+
+        return run_flat
 
     return run
 

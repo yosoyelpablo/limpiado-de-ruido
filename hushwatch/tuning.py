@@ -26,6 +26,12 @@ def _norm(value: str) -> str:
 
 VERDICTS: tuple[str, ...] = ("tune", "investigate", "fix_at_source", "aggregate", "do_not_tune", "watch", "learning")
 ACTIONS: tuple[str, ...] = ("demote", "review")
+# What a suggestion would change: "analyst" (alerts leave the triage queue), "index_volume" (passed every gate and
+# the backtest, but its rule is already at/below the demote level or below triage_level, so demoting it changes
+# nothing for analysts: only index volume could be saved, and never by a demote rule), "" (not assessed yet).
+IMPACTS: tuple[str, ...] = ("analyst", "index_volume", "")
+DEMOTE_LEVEL = 3  # level of the generated child rules (Wazuh's default log_alert_level: still indexed)
+LOG_ALERT_LEVEL = 3  # Wazuh default <log_alert_level>: alerts below it are not written to alerts.json
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,8 @@ class Suggestion:
     share_of_rule: float = 0.0
     reasons: list[Message | str] = field(default_factory=list)
     examples: list[dict[str, Any]] = field(default_factory=list)  # raw example docs (local files only)
+    impact: str = ""  # see IMPACTS
+    dependents_verified: bool = True  # False: the stock ruleset (or any ruleset) was not loaded
 
     def matches(self, event: Event) -> bool:
         if event.rule_id != self.rule_id:
@@ -82,4 +90,9 @@ class Suggestion:
 
     @property
     def review_required(self) -> bool:
-        return bool(self.dependents) or self.action == "review"
+        return bool(self.dependents) or self.action == "review" or not self.dependents_verified
+
+    @property
+    def index_volume(self) -> bool:
+        """Passed every gate and the backtest, but only index volume is at stake (see :data:`IMPACTS`)."""
+        return self.impact == "index_volume"

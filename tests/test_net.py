@@ -314,7 +314,7 @@ def test_tls_verification_failure_recommends_ca_cert_not_disabling() -> None:
     text = str(err)
     assert "ca_cert" in text and "root-ca.pem" in text and "Do not disable verification" in text
     assert "verify_tls: false" not in text
-    assert "ca_cert" in err.render("es") and "No desactives" in err.render("es")
+    assert "ca_cert" in err.render("es") and "No desactive la verificación" in err.render("es")  # usted register
 
 
 def test_tls_hostname_mismatch_and_wrong_protocol() -> None:

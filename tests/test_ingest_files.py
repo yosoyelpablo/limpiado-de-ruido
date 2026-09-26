@@ -24,6 +24,12 @@ from hushwatch.ingest import files as files_mod
 from hushwatch.ingest.files import rotated_date
 from hushwatch.models import Event, flatten
 
+
+def failures(basis: Any) -> list[str]:
+    """Partial failures as English text (they are translatable messages, rendered per report language)."""
+    return [render(p) for p in basis.partial_failures]
+
+
 UTC = timezone.utc
 FIXTURES = Path(__file__).parent / "fixtures" / "ingest"
 TENANT = TenantConfig()
@@ -403,7 +409,7 @@ def test_big_json_array_rejected_clearly(tmp_path: Path, monkeypatch: pytest.Mon
     small = _write(tmp_path / "small.json", _ndjson([_alert("2026-09-10T11:00:00.000+0000")]))
     source = _open([big, small])
     assert len(list(source)) == 1  # the other input is still analyzed
-    assert source.basis.partial_failures == [f"{big}: JSON array too large"]
+    assert failures(source.basis) == [f"{big}: JSON array too large"]
     assert not source.basis.complete
     warning = next(w for w in source.basis.warnings if getattr(w, "key", "") == "ingest.warn.array_too_large")
     assert "jq -c" in render(warning, "en") and "NDJSON" in render(warning, "es")
@@ -414,7 +420,7 @@ def test_invalid_json_array_is_a_partial_failure(tmp_path: Path) -> None:
     source = _open(path)
     assert list(source) == []
     assert source.basis.malformed == 1
-    assert source.basis.partial_failures == [f"{path}: invalid JSON array"]
+    assert failures(source.basis) == [f"{path}: invalid JSON array"]
 
 
 def test_pretty_printed_documents_and_search_response(tmp_path: Path) -> None:
@@ -479,7 +485,7 @@ def test_truncated_gzip_keeps_events_and_reports_failure(tmp_path: Path) -> None
     source = _open(path)
     events = list(source)
     assert 0 < len(events) < 20
-    assert source.basis.partial_failures == [f"{path}: truncated compressed data"]
+    assert failures(source.basis) == [f"{path}: the compressed data ends unexpectedly"]
     assert "ingest.warn.read_error" in _keys(source.basis.warnings)
 
 
@@ -488,7 +494,7 @@ def test_corrupt_gzip_is_a_partial_failure(tmp_path: Path) -> None:
     source = _open(path)
     assert list(source) == []
     assert len(source.basis.partial_failures) == 1
-    assert "compressed" in source.basis.partial_failures[0]
+    assert "compressed" in failures(source.basis)[0]
 
 
 @pytest.mark.parametrize(
@@ -499,7 +505,9 @@ def test_other_compressions_are_reported_not_parsed(tmp_path: Path, magic: bytes
     path = _write(tmp_path / f"alerts.json.{name}", magic + os.urandom(256))
     source = _open(path)
     assert list(source) == []
-    assert source.basis.partial_failures == [f"{path}: {name} compressed"]
+    assert failures(source.basis) == [
+        f"{path}: unsupported compression ({name}); decompress it or recompress it with gzip"
+    ]
     assert source.basis.malformed == 0
     warning = next(w for w in source.basis.warnings if getattr(w, "key", "") == "ingest.warn.read_error")
     assert "gzip" in render(warning, "en") and "gzip" in render(warning, "es")
@@ -527,7 +535,7 @@ def test_unreadable_file_is_a_partial_failure(tmp_path: Path) -> None:
     try:
         source = _open(path)
         assert list(source) == []
-        assert source.basis.partial_failures == [f"{path}: permission denied"]
+        assert failures(source.basis) == [f"{path}: permission denied"]
     finally:
         path.chmod(0o600)
 
@@ -575,7 +583,7 @@ def test_empty_directory_is_reported(tmp_path: Path) -> None:
     _write(tmp_path / "empty" / "readme.md", b"# nothing")
     source = _open(tmp_path / "empty")
     assert list(source) == []
-    assert source.basis.partial_failures == [f"{tmp_path / 'empty'}: no data files"]
+    assert failures(source.basis) == [f"{tmp_path / 'empty'}: no data files"]
     assert "ingest.warn.no_files" in _keys(source.basis.warnings)
 
 
@@ -874,7 +882,7 @@ def test_big_pretty_printed_document_is_a_reported_failure(tmp_path: Path, monke
     small = _write(tmp_path / "small.json", _ndjson([_alert("2026-09-10T11:00:00.000+0000")]))
     source = _open([big, small])
     assert len(list(source)) == 1
-    assert source.basis.partial_failures == [f"{big}: JSON document too large"]
+    assert failures(source.basis) == [f"{big}: JSON document too large"]
     assert source.basis.malformed == 0  # its lines are not NDJSON garbage
     assert not source.basis.complete
 
@@ -920,7 +928,7 @@ def test_live_file_relinked_between_passes_is_reported_not_misread(tmp_path: Pat
     live.unlink()
     os.link(day2, live)
     assert list(source) == []  # the second pass must not silently analyze another day's events
-    assert source.basis.partial_failures == [f"{live}: file replaced while being analyzed"]
+    assert failures(source.basis) == [f"{live}: the file was replaced or rotated while it was being analyzed"]
     assert not source.basis.complete
 
 
@@ -932,7 +940,7 @@ def test_file_truncated_between_passes_is_reported(tmp_path: Path) -> None:
         handle.truncate(0)
         handle.write(_ndjson([_alert("2026-09-25T01:00:00.000+0000")]))
     assert list(source) == []
-    assert source.basis.partial_failures == [f"{path}: file truncated while being analyzed"]
+    assert failures(source.basis) == [f"{path}: the file was truncated while it was being analyzed"]
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
@@ -942,7 +950,7 @@ def test_path_swapped_for_a_fifo_does_not_block(tmp_path: Path) -> None:
     path.unlink()
     os.mkfifo(path)  # opening a FIFO for reading blocks until a writer appears: must not hang the run
     assert list(source) == []
-    assert source.basis.partial_failures == [f"{path}: no longer a regular file"]
+    assert failures(source.basis) == [f"{path}: the path no longer points to a regular file"]
 
 
 def test_unstatable_directory_entry_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -959,7 +967,7 @@ def test_unstatable_directory_entry_is_reported(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(files_mod.os, "stat", fake_stat)
     source = _open(tmp_path / "d")
     assert len(list(source)) == 1
-    assert source.basis.partial_failures == [f"{locked}: permission denied"]
+    assert failures(source.basis) == [f"{locked}: permission denied"]
 
 
 def test_year_rollover_only_for_generic_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

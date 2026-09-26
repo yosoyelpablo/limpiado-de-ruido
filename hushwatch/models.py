@@ -134,6 +134,7 @@ class DataBasis:
     # shard failures, timeouts, auth errors, unreadable files; Message when a translation exists
     partial_failures: list[Message | str] = field(default_factory=list)
     excluded_by_window: int = 0  # events outside --since/--until (read but not analyzed)
+    excluded_newest: datetime | None = None  # newest of those excluded events (explains an empty window)
     skipped_files: list[str] = field(default_factory=list)  # files in input dirs not read (unknown extension...)
     warnings: list[Message | str] = field(default_factory=list)
     not_evaluated: list[str] = field(default_factory=list)  # analyses the input could not support

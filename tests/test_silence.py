@@ -596,7 +596,8 @@ def test_short_history_is_learning_and_never_green() -> None:
     result = run(world, cube, world.end)
     assert alarms(result) == []
     learning = [f for f in result.findings if f.kind == "assessment.learning"]
-    assert len(learning) == 1 and learning[0].severity is Severity.MEDIUM
+    # learning is LOW everywhere (one exit-code policy); "never green" comes from the section: not_assessed (grey)
+    assert len(learning) == 1 and learning[0].severity is Severity.LOW
     assert learning[0].domain == "assessment"
     assert result.section["status"] == "not_assessed"
     assert result.section["keys_evaluated"] == 0
@@ -1044,6 +1045,8 @@ def test_findings_and_section_are_strict_json() -> None:
     def default(obj: object) -> object:
         if isinstance(obj, Entity):
             return {"kind": obj.kind, "value": obj.value}
+        if isinstance(obj, Message):  # readable evidence lines ("explained" items): key + params
+            return {"key": obj.key, "params": dict(obj.params)}
         raise TypeError(type(obj))
 
     for finding in result.findings:

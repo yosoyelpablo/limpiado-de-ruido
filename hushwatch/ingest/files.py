@@ -36,7 +36,7 @@ import os
 import re
 import stat
 import zlib
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -76,6 +76,7 @@ _UNSUPPORTED_MAGIC: Final[tuple[tuple[bytes, str], ...]] = (
     (b"PK\x03\x04", "zip"),
 )
 MAX_FIELDS_PER_EVENT: Final = 5000  # flattened keys kept per event (field-explosion guard, reported when hit)
+MAX_SKIPPED_LISTED: Final = 200  # skipped files named in the data basis (all are counted)
 _WS: Final = re.compile(r"\s*")
 _ECS_ALERT_KINDS: Final = ("alert", "signal")  # ECS event.kind values of detection output
 
@@ -131,6 +132,12 @@ register(
             "en": "{path} contains no data files (.json, .ndjson, .jsonl, .csv or .tsv, optionally .gz).",
             "es": "{path} no contiene archivos de datos (.json, .ndjson, .jsonl, .csv o .tsv, opcionalmente .gz).",
         },
+        "ingest.warn.skipped_files": {
+            "en": "{count} file(s) in the input directories were not read because they do not hold JSON, NDJSON or "
+            "CSV events (for example {examples}). Convert or rename them if they contain events.",
+            "es": "No se leyeron {count} archivo(s) de los directorios de entrada porque no contienen eventos JSON, "
+            "NDJSON ni CSV (por ejemplo {examples}). Conviértalos o cámbieles el nombre si contienen eventos.",
+        },
         "ingest.warn.list_error": {
             "en": "Directory {path} could not be listed ({error}); the files inside it were not analyzed.",
             "es": "No se pudo listar el directorio {path} ({error}); sus archivos no se analizaron.",
@@ -151,6 +158,14 @@ register(
             "en": "Unknown keys in the input mapping were ignored: {keys}.",
             "es": "Se ignoraron claves desconocidas en el mapping de la entrada: {keys}.",
         },
+        "ingest.failure": {"en": "{file}: {reason}", "es": "archivo {file}: {reason}"},
+        "ingest.reason.list": {
+            "en": "cannot list the directory ({reason})",
+            "es": "no se puede listar el directorio ({reason})",
+        },
+        "ingest.reason.no_files": {"en": "no data files", "es": "no hay archivos de datos"},
+        "ingest.reason.array_too_large": {"en": "JSON array too large", "es": "array JSON demasiado grande"},
+        "ingest.reason.document_too_large": {"en": "JSON document too large", "es": "documento JSON demasiado grande"},
         "ingest.reason.permission": {"en": "permission denied", "es": "permiso denegado"},
         "ingest.reason.truncated": {
             "en": "the compressed data ends unexpectedly",
@@ -274,11 +289,13 @@ class ReadStats:
     malformed: int = 0  # unparseable lines / documents / CSV rows
     partial_lines: int = 0  # unterminated last lines (tolerated, not malformed)
     bytes_read: int = 0  # raw (on-disk, compressed) bytes consumed
-    partial_failures: list[str] = field(default_factory=list)
+    partial_failures: list[Message | str] = field(default_factory=list)
     warnings: list[Message | str] = field(default_factory=list)
 
     def fail(self, label: str, reason: Message, code: str) -> None:
-        self.partial_failures.append(f"{label}: {code}")
+        """Record a file that could not be read completely (``code``: English detail for the debug log)."""
+        log.debug("%s: %s", label, code)
+        self.partial_failures.append(M("ingest.failure", file=Entity("file", label), reason=reason))
         self.warnings.append(M("ingest.warn.read_error", file=Entity("file", label), error=reason))
 
 
@@ -322,8 +339,10 @@ class _FileSpec:
 class _Resolved:
     files: list[_FileSpec] = field(default_factory=list)
     warnings: list[Message | str] = field(default_factory=list)
-    failures: list[str] = field(default_factory=list)
+    failures: list[Message | str] = field(default_factory=list)
     pruned: int = 0
+    skipped: list[str] = field(default_factory=list)  # files inside input directories / globs that were not read
+    skipped_total: int = 0
 
 
 def _strip_gz(name: str) -> str:
@@ -385,6 +404,56 @@ def _kind_hint(path: str) -> str | None:
     return None
 
 
+_SNIFF_BYTES: Final = 64 * 1024
+
+
+def _sniff_json(path: str) -> bool:
+    """Whether a file without a data extension (``.log``, no extension...) holds JSON events: its first non-blank
+    line (after an optional gzip layer and BOM) is a JSON object, or it starts a JSON array of objects. Reads at most
+    ~64 KiB; never raises."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_SNIFF_BYTES)
+        if head.startswith(_GZIP_MAGIC):
+            head = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(head, _SNIFF_BYTES)
+    except (OSError, zlib.error, ValueError):
+        return False
+    if head.startswith(codecs.BOM_UTF8):
+        head = head[len(codecs.BOM_UTF8) :]
+    text = head.lstrip()
+    if text.startswith(b"["):
+        return text[1:].lstrip().startswith(b"{")
+    if not text.startswith(b"{"):
+        return False
+    end = text.find(b"\n")
+    if end < 0:
+        return text.rstrip().endswith(b"}") or len(head) >= _SNIFF_BYTES  # one (long) document
+    try:
+        return isinstance(json.loads(text[:end]), dict)
+    except (ValueError, RecursionError):
+        return b"\n" in text and text[:end].rstrip() == b"{"  # a pretty-printed document
+
+
+def _companion(name: str, siblings: set[str]) -> bool:
+    """Wazuh writes every JSON log with companions that are not event data: ``.sum`` checksums and the plain-text
+    ``alerts.log`` / ``ossec-alerts-DD.log(.gz)`` twin of ``alerts.json``. They are skipped silently when the JSON
+    twin is there (a ``.log`` without it is reported: it may be the only copy of the events)."""
+    lowered = name.lower()
+    if lowered.endswith(".sum"):
+        return True
+    base = _strip_gz(lowered)
+    if not base.endswith(".log"):
+        return False
+    stem = base[:-4]
+    return f"{stem}.json" in siblings or f"{stem}.json.gz" in siblings
+
+
+def _skip(out: _Resolved, path: str) -> None:
+    out.skipped_total += 1
+    if len(out.skipped) < MAX_SKIPPED_LISTED:
+        out.skipped.append(path)
+
+
 def _has_magic(text: str) -> bool:
     return any(ch in text for ch in "*?[")
 
@@ -394,13 +463,16 @@ def _walk(root: str, found: list[tuple[str, os.stat_result]], out: _Resolved) ->
         where = str(exc.filename or root)
         reason, code = _reason(exc)
         out.warnings.append(M("ingest.warn.list_error", path=Entity("file", where), error=reason))
-        out.failures.append(f"{where}: cannot list directory ({code})")
+        listing = M("ingest.reason.list", reason=reason)
+        out.failures.append(M("ingest.failure", file=Entity("file", where), reason=listing))
+        log.debug("%s: cannot list directory (%s)", where, code)
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=onerror, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        lowered = {n.lower() for n in filenames}
         for name in sorted(filenames):
-            if name.startswith(".") or not _is_data_file(name):
-                continue
+            if name.startswith("."):
+                continue  # hidden files (.DS_Store, editor swap files...) are never event data
             full = os.path.join(dirpath, name)
             try:
                 st = os.stat(full)
@@ -408,12 +480,20 @@ def _walk(root: str, found: list[tuple[str, os.stat_result]], out: _Resolved) ->
                 log.debug("skipping dangling directory entry %s", full)  # e.g. a broken symlink: no data behind it
                 continue
             except OSError as exc:  # a data file we cannot even stat must not vanish from the analysis silently
+                if not _is_data_file(name):
+                    _skip(out, full)
+                    continue
                 reason, code = _reason(exc)
                 out.warnings.append(M("ingest.warn.read_error", file=Entity("file", full), error=reason))
-                out.failures.append(f"{full}: {code}")
+                out.failures.append(M("ingest.failure", file=Entity("file", full), reason=reason))
+                log.debug("%s: %s", full, code)
                 continue
-            if stat.S_ISREG(st.st_mode):
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if _is_data_file(name) or _sniff_json(full):
                 found.append((full, st))
+            elif not _companion(name, lowered):  # Wazuh's plain-text / checksum twins are not event data
+                _skip(out, full)  # never silently: the data basis lists what was left out
 
 
 def _collect(given: str, out: _Resolved) -> list[tuple[str, os.stat_result]]:
@@ -437,8 +517,11 @@ def _collect(given: str, out: _Resolved) -> list[tuple[str, os.stat_result]]:
                 continue
             if stat.S_ISDIR(mst.st_mode):
                 _walk(match, found, out)
-            elif stat.S_ISREG(mst.st_mode) and _is_data_file(match):
-                found.append((match, mst))
+            elif stat.S_ISREG(mst.st_mode):
+                if _is_data_file(match) or _sniff_json(match):
+                    found.append((match, mst))
+                else:
+                    _skip(out, match)
         if not found:
             raise IngestError(f"no data files match {given}")
         return found
@@ -446,7 +529,7 @@ def _collect(given: str, out: _Resolved) -> list[tuple[str, os.stat_result]]:
         _walk(expanded, found, out)
         if not found:
             out.warnings.append(M("ingest.warn.no_files", path=Entity("file", given)))
-            out.failures.append(f"{given}: no data files")
+            out.failures.append(M("ingest.failure", file=Entity("file", given), reason=M("ingest.reason.no_files")))
         return found
     if not stat.S_ISREG(st.st_mode):
         raise IngestError(
@@ -609,7 +692,15 @@ def _open_snapshot(spec: _FileSpec) -> io.FileIO:
         raise
 
 
-def _iter_file(spec: _FileSpec, stats: ReadStats) -> Generator[dict[str, Any], None, None]:
+@dataclass(slots=True)
+class _Gate:
+    """Line pre-filter for NDJSON input: when ``keep`` is set, lines it rejects are skipped before JSON parsing
+    (the noise backtest only needs a few rules' events). It can be set while the file is being read."""
+
+    keep: Callable[[bytes], bool] | None = None
+
+
+def _iter_file(spec: _FileSpec, stats: ReadStats, gate: _Gate | None = None) -> Generator[dict[str, Any], None, None]:
     """Documents of one file. Read errors are recorded in ``stats`` (never raised)."""
     force_ndjson = False
     for _attempt in range(2):
@@ -626,7 +717,7 @@ def _iter_file(spec: _FileSpec, stats: ReadStats) -> Generator[dict[str, Any], N
                         if head.startswith(magic):
                             stats.fail(spec.label, M("ingest.reason.compression", format=name), f"{name} compressed")
                             return
-                yield from _iter_stream(stream, spec, stats, force_ndjson)
+                yield from _iter_stream(stream, spec, stats, force_ndjson, gate)
             return
         except _Restart:
             force_ndjson = True
@@ -647,7 +738,11 @@ def _iter_file(spec: _FileSpec, stats: ReadStats) -> Generator[dict[str, Any], N
 
 
 def _iter_stream(
-    stream: io.BufferedReader[Any] | gzip.GzipFile, spec: _FileSpec, stats: ReadStats, force_ndjson: bool
+    stream: io.BufferedReader[Any] | gzip.GzipFile,
+    spec: _FileSpec,
+    stats: ReadStats,
+    force_ndjson: bool,
+    gate: _Gate | None = None,
 ) -> Iterator[dict[str, Any]]:
     head = stream.peek(4)[:4]
     utf16 = head.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) and not head.startswith(codecs.BOM_UTF32_LE)
@@ -661,7 +756,7 @@ def _iter_stream(
     reader: _LineReader = stream
     if utf16:
         reader = _TextLines(io.TextIOWrapper(stream, encoding=encoding, errors="replace"))
-    yield from _iter_json(reader, spec, stats, force_ndjson)
+    yield from _iter_json(reader, spec, stats, force_ndjson, gate)
 
 
 def _documents(obj: dict[str, Any], stats: ReadStats) -> Iterator[dict[str, Any]]:
@@ -681,7 +776,9 @@ def _documents(obj: dict[str, Any], stats: ReadStats) -> Iterator[dict[str, Any]
     yield unwrap_hit(obj)
 
 
-def _iter_json(reader: _LineReader, spec: _FileSpec, stats: ReadStats, force_ndjson: bool) -> Iterator[dict[str, Any]]:
+def _iter_json(
+    reader: _LineReader, spec: _FileSpec, stats: ReadStats, force_ndjson: bool, gate: _Gate | None = None
+) -> Iterator[dict[str, Any]]:
     limit = MAX_LINE_BYTES + 1
     first = reader.readline(limit)
     while first and not first.strip():
@@ -698,10 +795,12 @@ def _iter_json(reader: _LineReader, spec: _FileSpec, stats: ReadStats, force_ndj
         if stripped.startswith(b"{") and not stripped.endswith(b"}"):
             yield from _iter_document(first, reader, spec, stats)  # raises _Restart before yielding if not JSON
             return
-    yield from _iter_ndjson(first, reader, stats)
+    yield from _iter_ndjson(first, reader, stats, gate)
 
 
-def _iter_ndjson(first: bytes, reader: _LineReader, stats: ReadStats) -> Iterator[dict[str, Any]]:
+def _iter_ndjson(
+    first: bytes, reader: _LineReader, stats: ReadStats, gate: _Gate | None = None
+) -> Iterator[dict[str, Any]]:
     limit = MAX_LINE_BYTES + 1
     line = first
     while line:
@@ -710,6 +809,9 @@ def _iter_ndjson(first: bytes, reader: _LineReader, stats: ReadStats) -> Iterato
             while line and not line.endswith(b"\n"):
                 line = reader.readline(limit)
             line = reader.readline(limit)
+            continue
+        if gate is not None and gate.keep is not None and not gate.keep(line):
+            line = reader.readline(limit)  # pre-filtered out (a superset test): not parsed, not counted
             continue
         text = line.strip()
         if text:
@@ -753,8 +855,9 @@ def _second_line_is_object(data: bytes) -> bool:
     return False
 
 
-def _too_large(spec: _FileSpec, stats: ReadStats, what: str = "JSON array") -> None:
-    stats.partial_failures.append(f"{spec.label}: {what} too large")
+def _too_large(spec: _FileSpec, stats: ReadStats, what: str = "array") -> None:
+    reason = M("ingest.reason.document_too_large" if what == "document" else "ingest.reason.array_too_large")
+    stats.partial_failures.append(M("ingest.failure", file=Entity("file", spec.label), reason=reason))
     stats.warnings.append(
         M("ingest.warn.array_too_large", file=Entity("file", spec.label), limit_mb=MAX_JSON_DOCUMENT_BYTES >> 20)
     )
@@ -810,7 +913,7 @@ def _iter_document(first: bytes, reader: _LineReader, spec: _FileSpec, stats: Re
         if _second_line_is_object(data):
             raise _Restart  # NDJSON whose first line is broken: read it line by line
         del data
-        _too_large(spec, stats, "JSON document")  # too big to parse with bounded memory
+        _too_large(spec, stats, "document")  # too big to parse with bounded memory
         return
     text = data.decode("utf-8", "replace").lstrip("\ufeff")
     del data
@@ -953,6 +1056,41 @@ def _iter_resolved(files: list[_FileSpec], stats: ReadStats) -> Iterator[tuple[d
             docs.close()
 
 
+# ---- rule pre-filter ------------------------------------------------------------------------------------------
+
+# rule ids that JSON writes verbatim (no escapes: no quote, backslash, slash, control or non-ASCII characters)
+_VERBATIM_ID: Final = re.compile(r"[ !#-.0-\[\]-~]{1,256}")
+
+
+def rule_line_filter(rule_ids: Collection[str], *, numbers: bool = True) -> Callable[[bytes], bool] | None:
+    """A cheap test on one raw NDJSON line: False only when the line cannot hold an event of one of ``rule_ids``.
+
+    A rule id is a JSON string (``"5710"``, written verbatim) or, in some exports, a number (``: 5710,``); both forms
+    are looked for (``numbers=False``: strings only, as Wazuh writes ``rule.id``). None when an id could be written
+    with escapes (then every line must be parsed).
+    """
+    ids = sorted({r for r in rule_ids if isinstance(r, str) and r})
+    if not ids or any(_VERBATIM_ID.fullmatch(r) is None for r in ids):
+        return None
+    quoted = tuple(b'"' + r.encode("ascii") + b'"' for r in ids)
+    digits = [r.encode("ascii") for r in ids if r.isdigit()] if numbers else []
+    bare = (
+        re.compile(rb"(?<=[:\[,\s])(?:" + b"|".join(re.escape(d) for d in digits) + rb")(?=[,\]}\s.eE])")
+        if digits
+        else None
+    )
+
+    def keep(line: bytes) -> bool:
+        for needle in quoted:
+            if needle in line:
+                return True
+        if bare is None:
+            return False
+        return any(d in line for d in digits) and bare.search(line) is not None
+
+    return keep
+
+
 # ---- the event source -----------------------------------------------------------------------------------------
 
 
@@ -1058,6 +1196,7 @@ class FileEventSource:
         start: datetime | None = None
         end: datetime | None = None
         now: datetime | None = None
+        excluded_newest: datetime | None = None  # newest event left out by since/until (explains an empty window)
         truncated = False
         reported = 0
         file_profiles: list[str] = []
@@ -1111,6 +1250,8 @@ class FileEventSource:
                     ts = event.ts
                     if (since is not None and ts < since) or (until is not None and ts >= until):
                         filtered += 1
+                        if (excluded_newest is None or ts > excluded_newest) and ts <= future_limit:
+                            excluded_newest = ts
                         continue
                     if limit is not None and events >= limit:
                         truncated = True
@@ -1159,6 +1300,7 @@ class FileEventSource:
             file_profiles=file_profiles,
             kinds=kinds,
             naive_files=naive_files,
+            excluded_newest=excluded_newest,
         )
         log.debug(
             "ingest pass: %d events, %d malformed, %d partial last lines, %d bad timestamps, %d future, "
@@ -1171,6 +1313,61 @@ class FileEventSource:
             filtered,
             truncated,
         )
+
+    def iter_rules(self, rule_ids: Collection[str]) -> Iterator[Event]:
+        """The events of ``rule_ids`` only, exactly as a full iteration yields them (same files, time window and
+        fields), read cheaply for the noise backtest: NDJSON lines that cannot hold one of those rules are skipped
+        before JSON parsing (a superset test on the raw bytes, then an exact check on the normalized rule id).
+
+        ``basis`` is left untouched (it describes the full pass). With ``max_events`` the full pass decides which
+        events were analyzed, so then every document is read and filtered.
+        """
+        wanted = frozenset(r for r in rule_ids if isinstance(r, str) and r)
+        if not wanted:
+            return
+        if self._max_events is not None:
+            saved = self.basis
+            try:
+                yield from (event for event in self if event.rule_id in wanted)
+            finally:
+                self.basis = saved
+            return
+        keep_any = rule_line_filter(wanted)
+        keep_strings = rule_line_filter(wanted, numbers=False)  # Wazuh always writes rule.id as a JSON string
+        stats = ReadStats()
+        since, until = self._since, self._until
+        project, input_cfg = self._project, self.input_cfg
+        for spec in self._resolved.files:
+            gate = _Gate()
+            docs = _iter_file(spec, stats, gate)
+            try:
+                profile = self.profile
+                stream: Iterator[dict[str, Any]] = docs
+                if profile == "auto":  # detected from the same head as the full pass (parsed unfiltered)
+                    head = self._detection_sample(docs, stats)
+                    profile = detect_profile(head) if head else "generic"
+                    stream = itertools.chain(head, docs)
+                gate.keep = keep_strings if profile in ("wazuh4", "wazuh5") else keep_any
+                norm = bind(profile, input_cfg=input_cfg, default_year=spec.year, project=project)
+                rollover_after = spec.ref_time + _ROLLOVER if spec.rotated is None and profile == "generic" else None
+                for doc in stream:
+                    try:
+                        event = norm(doc)
+                        if event is not None and rollover_after is not None and event.ts > rollover_after:
+                            event = self._year_rollover(doc, profile, spec.year, event)
+                    except Exception as exc:  # counted by the full pass; never abort the backtest over one document
+                        log.debug("document in %s could not be normalized (%s)", spec.label, type(exc).__name__)
+                        continue
+                    if event is None or event.rule_id not in wanted:
+                        continue
+                    ts = event.ts
+                    if (since is not None and ts < since) or (until is not None and ts >= until):
+                        continue
+                    if len(event.fields) > MAX_FIELDS_PER_EVENT:
+                        event.fields = self._cap_fields(doc, profile, spec.year, event.fields)
+                    yield event
+            finally:
+                docs.close()
 
     @staticmethod
     def _detection_sample(docs: Iterator[dict[str, Any]], stats: ReadStats) -> list[dict[str, Any]]:
@@ -1216,6 +1413,7 @@ class FileEventSource:
         file_profiles: list[str],
         kinds: dict[str, str],
         naive_files: list[str],
+        excluded_newest: datetime | None = None,
     ) -> DataBasis:
         distinct_profiles = sorted(set(file_profiles))
         if len(distinct_profiles) == 1:
@@ -1260,6 +1458,10 @@ class FileEventSource:
             warnings.append(M("ingest.warn.fields_capped", count=capped, limit=MAX_FIELDS_PER_EVENT))
         if naive_files:
             warnings.append(M("ingest.warn.naive_utc", count=len(naive_files), file=Entity("file", naive_files[0])))
+        skipped = self._resolved.skipped
+        if self._resolved.skipped_total:
+            examples = [Entity("file", path) for path in skipped[:3]]
+            warnings.append(M("ingest.warn.skipped_files", count=self._resolved.skipped_total, examples=examples))
 
         return DataBasis(
             input_kind=input_kind,
@@ -1276,5 +1478,8 @@ class FileEventSource:
             sampled=False,
             truncated=truncated,
             partial_failures=[*self._resolved.failures, *stats.partial_failures],
+            excluded_by_window=filtered,
+            excluded_newest=excluded_newest,
+            skipped_files=list(skipped),
             warnings=warnings,
         )
