@@ -289,7 +289,7 @@ def _config_checks(cfg: Config) -> list[Check]:
     except OSError as exc:
         error = exc.strerror or type(exc).__name__
         return [Check("-", M("doctor.check.config"), "fail", M("doctor.config.stat", path=shown, error=error))]
-    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    if os.name == "posix" and mode & (stat.S_IRWXG | stat.S_IRWXO):  # (Windows ACLs are not mode bits)
         out.append(
             Check(
                 "-",

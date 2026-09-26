@@ -67,6 +67,11 @@ def mode(path: Path) -> int:
     return stat.S_IMODE(os.lstat(path).st_mode)
 
 
+def private(path: Path, want: int = 0o600) -> bool:
+    """Owner-only permissions; Windows has ACLs, not POSIX mode bits, so there is nothing to compare."""
+    return os.name != "posix" or mode(path) == want
+
+
 def alert_docs(hosts: Sequence[str] = HOSTS, *, start: datetime = START, days: int = DAYS) -> list[dict[str, Any]]:
     """Steady sshd 'authentication success' alerts (level 3) from ``hosts``."""
     docs = []
@@ -524,7 +529,7 @@ def test_reports_are_written_atomically_and_privately(tmp_path: Path, alerts: Pa
     out = tmp_path / "new" / "deeper" / "report.md"
     result = run("report", alerts, "--now", NOW, "-f", "md", "-o", out)
     assert result.exit_code in (0, 3)
-    assert mode(out) == 0o600 and mode(out.parent) == 0o700 and mode(out.parent.parent) == 0o700
+    assert private(out) and private(out.parent, 0o700) and private(out.parent.parent, 0o700)
     assert [p.name for p in out.parent.iterdir()] == ["report.md"]  # no temporary file left behind
 
 
@@ -538,6 +543,7 @@ def test_force_lets_an_existing_suppression_directory_be_reused(tmp_path: Path, 
     assert forced.exit_code != 2
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_a_redaction_key_problem_is_a_config_error(tmp_path: Path, alerts: Path) -> None:
     state = private_dir(tmp_path / "state")
     (state / "keys").mkdir()

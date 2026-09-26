@@ -78,6 +78,11 @@ def mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def private(path: Path, want: int = 0o600) -> bool:
+    """Owner-only permissions; Windows has ACLs, not POSIX mode bits, so there is nothing to compare."""
+    return os.name != "posix" or mode(path) == want
+
+
 def expected_exit(report: dict[str, Any], fail_on: str) -> int:
     """The documented contract: 3 incomplete analysis, 1 findings at/above --fail-on, else 0."""
     if report["assessment"]["assessment"] == "fail":
@@ -339,8 +344,8 @@ def test_demo_command_writes_html_report_and_suppressions(
     label = "HTML report" if lang == "en" else "Informe HTML"
     assert f"{label}: {html_path}" in stdout.replace("\n", "")
     assert ("Generating a synthetic" if lang == "en" else "Generando un conjunto") in text(result.stderr)
-    assert html_path.is_file() and mode(html_path) == 0o600
-    assert mode(out_dir / "hushwatch.yml") == 0o600  # the demo config is private like any other config
+    assert html_path.is_file() and private(html_path)
+    assert private(out_dir / "hushwatch.yml")  # the demo config is private like any other config
     html = html_path.read_text(encoding="utf-8")
     assert html.lstrip().lower().startswith("<!doctype html")
     assert f'<html lang="{lang}"' in html
@@ -353,9 +358,9 @@ def test_demo_command_writes_html_report_and_suppressions(
     # the rules line is printed exactly when a rule file was written (the small demo may have no safe candidate)
     assert (("Suggested Wazuh rules" if lang == "en" else "Reglas de Wazuh sugeridas") in stdout) == written
     if written:
-        assert mode(suppressions) == 0o700
+        assert private(suppressions, 0o700)
         for name in ("hushwatch_local_rules.xml", "hushwatch_suppressions.json", "VALIDATION.md"):
-            assert mode(suppressions / name) == 0o600, name
+            assert private(suppressions / name), name
         assert sum(1 for _ in ET.parse(rules_xml).getroot().iter("rule")) >= 1
     # running the demo again replaces its own files (no "pass --force" dead end)
     again = run("demo", "--out", out_dir, "--no-open", "--lang", lang, *extra)
@@ -370,7 +375,7 @@ def test_report_json_to_file(json_report: tuple[Result, Path, dict[str, Any]], d
     assert result.exit_code == expected_exit(report, "critical") == 1
     assert result.stdout == ""
     assert f"report written to {path}" in text(result.stderr)
-    assert mode(path) == 0o600
+    assert private(path)
     assert report["document"] == "hushwatch.report"
     assert report["tenant"] == demo.tenant
     assert report["lang"] == "en"
@@ -413,7 +418,7 @@ def test_report_formats_to_file(
     assert f"{written} {out}" in text(result.stderr)
     if fmt == "console":  # a console report written to a file is Markdown, and the message says so
         assert "Markdown" in text(result.stderr)
-    assert mode(out) == 0o600
+    assert private(out)
     body = out.read_text(encoding="utf-8")
     assert marker in body
     assert "dc02" in body  # not redacted
@@ -558,7 +563,7 @@ def test_output_file_is_private_even_when_it_already_exists(tmp_path: Path, smal
     result = run("report", small_alerts, "--now", SYNTH_NOW, "-f", "json", "-o", out)
     assert result.exit_code == 0
     assert json.loads(out.read_text(encoding="utf-8"))["document"] == "hushwatch.report"
-    assert mode(out) == 0o600
+    assert private(out)
 
 
 @pytest.mark.parametrize("problem", ["missing", "bad_header"])
@@ -633,9 +638,9 @@ def test_noise_emit_suppressions(demo: DemoManifest, demo_config: Path, tmp_path
         assert not rules_xml.exists()
         return
     assert report["sections"]["noise"]["suppressions_file"] == str(rules_xml)
-    assert mode(out_dir) == 0o700
+    assert private(out_dir, 0o700)
     for path in out_dir.iterdir():
-        assert mode(path) == 0o600, path.name
+        assert private(path), path.name
     xml_text = rules_xml.read_text(encoding="utf-8")
     assert "real values" in xml_text  # local-only header
     root = ET.fromstring(xml_text)
@@ -673,7 +678,7 @@ def test_silence(demo: DemoManifest, demo_config: Path, tmp_path: Path) -> None:
     assert any(k == "silence.field_lost" and "fw-edge-01" in s for k, s in subjects)
 
     result = run("silence", demo.alerts_path, "-c", demo_config, "--now", demo.now.isoformat(), "-f", "md", "-o", out)
-    assert result.exit_code == 0 and mode(out) == 0o600
+    assert result.exit_code == 0 and private(out)
     assert "# hushwatch" in out.read_text(encoding="utf-8")
 
 
@@ -744,7 +749,7 @@ def test_check_twice_dry_run(
     assert two["resolved"] == 0
 
     db = state_dir / STATE_FILENAME
-    assert db.is_file() and mode(db) == 0o600
+    assert db.is_file() and private(db)
     with StateStore(state_dir) as store:
         last = store.last_run(demo.tenant)
         assert last is not None and last.run_at == frozen_clock.current
@@ -846,7 +851,7 @@ def test_fleet_two_tenants_json_redacted(
     assert result.exit_code == 0
     stderr = text(result.stderr)
     assert "analyzing alpha" in stderr and "analyzing bravo" in stderr
-    assert mode(out) == 0o600
+    assert private(out)
     body = out.read_text(encoding="utf-8")
     doc = json.loads(body)
     assert doc["document"] == "hushwatch.fleet"

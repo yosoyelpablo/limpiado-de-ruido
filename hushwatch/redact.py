@@ -274,7 +274,7 @@ def _private_dirs(directory: Path) -> None:
 def _read_key(path: Path) -> bytes | None:
     """The key in ``path``, None when absent; refuse a symlink, a foreign or group/other-accessible file."""
     shown = Entity("file", str(path))
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
@@ -302,7 +302,14 @@ def _read_key(path: Path) -> bytes | None:
 
 def _create_key(path: Path) -> bytes:
     key = secrets.token_bytes(KEY_BYTES)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError:  # created concurrently: use that one (after the same checks)

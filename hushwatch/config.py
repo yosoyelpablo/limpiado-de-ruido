@@ -828,7 +828,7 @@ def _secret_url(url: str, kind: str) -> bool:
 
 def _warn_if_exposed(path: Path, literal: Sequence[str]) -> None:
     """Warn when a config holding literal credentials is readable by group/others."""
-    if not literal:
+    if not literal or os.name != "posix":  # (Windows ACLs are not mode bits)
         return
     try:
         mode = path.stat().st_mode

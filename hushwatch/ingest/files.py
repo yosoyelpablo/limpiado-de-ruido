@@ -511,7 +511,9 @@ def _collect(given: str, out: _Resolved) -> list[tuple[str, os.stat_result]]:
     except (FileNotFoundError, NotADirectoryError):
         st = None
     except OSError as exc:
-        raise IngestError(f"cannot access input {given}: {exc.strerror or type(exc).__name__}") from None
+        if not _has_magic(given):
+            raise IngestError(f"cannot access input {given}: {exc.strerror or type(exc).__name__}") from None
+        st = None  # Windows refuses to stat a name containing '*' or '?' (not a missing file): expand the glob
     if st is None:
         if not _has_magic(given):
             raise IngestError(f"input not found: {given}")

@@ -9,6 +9,7 @@ This is the contract hushwatch is judged by:
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -258,7 +259,7 @@ def test_suppression_file_is_written_and_valid(run: Run) -> None:
     emitted = run.outcome.emitted
     assert emitted is not None and emitted.paths, "expected Wazuh suppression rules for the safe candidates"
     xml_path = Path(emitted.paths[0])
-    assert xml_path.stat().st_mode & 0o077 == 0
+    assert os.name != "posix" or xml_path.stat().st_mode & 0o077 == 0
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(f"<root>{xml_path.read_text(encoding='utf-8')}</root>")

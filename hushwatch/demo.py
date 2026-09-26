@@ -542,7 +542,14 @@ def _jsonable(value: Any) -> Any:
 def _write_private(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` readable by the owner only (0600), also when the file already exists; a symlink
     in its place is refused (O_NOFOLLOW) rather than followed."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         if hasattr(os, "fchmod"):

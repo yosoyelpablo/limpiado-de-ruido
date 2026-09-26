@@ -1883,7 +1883,9 @@ def state_dir_problem(state_dir: str | Path) -> tuple[str, Message] | None:
 def _is_sqlite(path: Path) -> bool:
     """True for an empty file or one that starts with the SQLite header (read without following links)."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+        )
     except OSError:
         return False
     try:
@@ -1958,7 +1960,14 @@ def _check_not_link(path: Path) -> None:
 
 def _ensure_private_file(path: Path) -> None:
     """Create the database file 0600 (never through a symlink) or tighten an existing regular file."""
-    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError:

@@ -32,6 +32,11 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
+def private(path: Path, want: int = 0o600) -> bool:
+    """Owner-only permissions; Windows has ACLs, not POSIX mode bits, so there is nothing to compare."""
+    return os.name != "posix" or _mode(path) == want
+
+
 def _write(path: Path, raw: object, mode: int = 0o600) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(raw if isinstance(raw, str) else yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -135,6 +140,7 @@ def test_criticality_tiers_are_validated_and_unknown_trusted_fields_warned() -> 
         parse_config({"tenants": {"a": {"trusted_entities": {"user": ["x"], "data.win.eventdata.image": ["y"]}}}}, {})
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_literal_credentials_are_found_in_the_parsed_tree(tmp_path: Path) -> None:
     text = """\
 tenants:
@@ -207,7 +213,7 @@ def test_a_missing_path_without_suffix_is_a_state_directory(tmp_path: Path) -> N
     with StateStore(target) as store:
         assert store.path == target / STATE_FILENAME
         store.record_run(TENANT, [], now=T0)
-    assert target.is_dir() and _mode(target) == 0o700
+    assert target.is_dir() and private(target, 0o700)
     assert (target / STATE_FILENAME).is_file()
 
 
@@ -223,13 +229,14 @@ def test_a_database_created_at_the_directory_path_is_migrated(tmp_path: Path) ->
     problem = state_dir_problem(state_dir)
     assert problem is not None and problem[0] == "warn"
     assert prepare_state_dir(state_dir) == state_dir
-    assert state_dir.is_dir() and _mode(state_dir) == 0o700
+    assert state_dir.is_dir() and private(state_dir, 0o700)
     assert state_dir_problem(state_dir) is None
     with StateStore(state_dir / STATE_FILENAME) as store:
         last = store.last_run(TENANT)
         assert last is not None and last.run_at == T0  # history kept
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_prepare_state_dir_refuses_other_files_and_shared_directories(tmp_path: Path) -> None:
     plain = tmp_path / "notes"
     plain.write_text("hello", encoding="utf-8")
@@ -242,7 +249,7 @@ def test_prepare_state_dir_refuses_other_files_and_shared_directories(tmp_path: 
     with pytest.raises(StateError, match="other users"):
         prepare_state_dir(shared)
     created = prepare_state_dir(tmp_path / "a" / "b")
-    assert _mode(tmp_path / "a") == 0o700 and _mode(created) == 0o700
+    assert private(tmp_path / "a", 0o700) and private(created, 0o700)
 
 
 # ---- lifecycle: explained findings and kinds a run could not re-check --------------------------------------------
@@ -292,8 +299,8 @@ def test_tenants_with_similar_names_never_share_a_redaction_key(
     keys = state / "keys"
     files = sorted(p.name for p in keys.iterdir())
     assert files == sorted(key_filename(n) for n in names) and len(set(files)) == 3
-    assert _mode(keys) == 0o700 and _mode(state) == 0o700
-    assert all(_mode(keys / f) == 0o600 and (keys / f).stat().st_size == 32 for f in files)
+    assert private(keys, 0o700) and private(state, 0o700)
+    assert all(private(keys / f) and (keys / f).stat().st_size == 32 for f in files)
     again = Redactor.for_tenant("cliente/norte", state).token("dc01", "host")
     assert again == tokens["cliente/norte"]  # stable across runs
 
