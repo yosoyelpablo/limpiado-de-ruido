@@ -940,6 +940,7 @@ def test_doctor_fails_when_an_input_is_not_reachable(tmp_path: Path) -> None:
     assert re.search(r"\d+ checks?: [1-9]\d* failed", out)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_doctor_config_permissions(demo_config: Path) -> None:
     os.chmod(demo_config, 0o644)
     try:
