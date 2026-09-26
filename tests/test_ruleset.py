@@ -369,6 +369,7 @@ def test_invalid_utf8_and_utf16(tmp_path: Path) -> None:
         "<![CDATA[" * 60000,
         "<var name='x'>1</var>\n" * 30000 + "<group>",  # many blocks, each used to be re-prefixed with newlines
     ],
+    ids=["doctype", "entities", "groups", "comments", "rules", "cdata", "vars"],  # short ids: Windows env var limit
 )
 def test_pathological_files_parse_in_linear_time(text: str) -> None:
     started = time.perf_counter()

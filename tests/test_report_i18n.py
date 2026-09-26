@@ -201,7 +201,8 @@ def test_spanish_demo_report_has_no_english_labels_or_raw_keys(demo_report: Repo
             raw.group(0) if raw else "",
             clean[max(0, raw.start() - 80) : raw.end() + 40] if raw else "",
         )
-        snake = set(re.findall(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b", clean)) - _ALLOWED_SNAKE
+        words = re.sub(r"\S*[/\\]\S*", " ", clean)  # file paths (a macOS temp dir looks like snake_case)
+        snake = set(re.findall(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b", words)) - _ALLOWED_SNAKE
         assert not snake, (fmt, sorted(snake))
         assert "(s)" not in clean and "(es)" not in clean, fmt
         assert "check: win_4688" not in clean and "kind: ok" not in clean, fmt  # no dict dumps

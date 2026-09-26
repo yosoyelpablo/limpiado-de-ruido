@@ -528,6 +528,7 @@ def test_field_explosion_is_capped_and_reported(tmp_path: Path, monkeypatch: pyt
     assert warning.params["count"] == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can read anything")
 def test_unreadable_file_is_a_partial_failure(tmp_path: Path) -> None:
     path = _write(tmp_path / "secret.json", _ndjson([_alert("2026-09-10T10:00:00.000+0000")]))

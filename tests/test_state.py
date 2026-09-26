@@ -695,6 +695,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
 def test_file_and_directory_permissions(tmp_path: Path) -> None:
     db = tmp_path / "a" / "b" / "state.sqlite3"
     with StateStore(db) as s:
@@ -707,6 +708,7 @@ def test_file_and_directory_permissions(tmp_path: Path) -> None:
     assert _mode(tmp_path / "a") == 0o700 and _mode(tmp_path / "a" / "b") == 0o700
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
 def test_symlinked_database_is_refused(tmp_path: Path) -> None:
     # regression: the store opened (and chmod-ed, then overwrote) whatever file the link pointed to
     victim = tmp_path / "victim.txt"
@@ -761,6 +763,7 @@ def test_state_directory_owned_by_another_user_is_refused(tmp_path: Path) -> Non
         StateStore(foreign / STATE_FILENAME)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
 def test_tighten_never_follows_symlinks(tmp_path: Path) -> None:
     from hushwatch.state import _tighten
 
@@ -775,6 +778,7 @@ def test_tighten_never_follows_symlinks(tmp_path: Path) -> None:
     assert _mode(victim) == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
 def test_existing_loose_file_is_tightened(tmp_path: Path) -> None:
     db = tmp_path / "loose.sqlite3"
     sqlite3.connect(db).close()
@@ -976,6 +980,7 @@ def test_two_stores_same_file_threads(tmp_path: Path) -> None:
     assert conn.execute("SELECT COUNT(*) FROM history WHERE event = 'opened'").fetchone()[0] == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
 def test_opening_a_store_never_opens_sqlite_files_behind_its_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

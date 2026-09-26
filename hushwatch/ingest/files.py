@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import stat
+import sys
 import zlib
 from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -655,9 +656,10 @@ class _Changed(Exception):
         self.code = code
 
 
+_NONBLOCK: Final = getattr(os, "O_NONBLOCK", 0)
 _OPEN_FLAGS: Final = (
     os.O_RDONLY
-    | getattr(os, "O_NONBLOCK", 0)  # a path swapped for a FIFO must not block the run forever
+    | _NONBLOCK  # a path swapped for a FIFO must not block the run forever
     | getattr(os, "O_NOCTTY", 0)
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_BINARY", 0)
@@ -689,7 +691,7 @@ def _open_snapshot(spec: _FileSpec) -> io.FileIO:
             raise _Changed("ingest.reason.replaced", "file replaced while being analyzed")
         if st.st_size < spec.size:
             raise _Changed("ingest.reason.shrank", "file truncated while being analyzed")
-        if hasattr(os, "set_blocking"):
+        if sys.platform != "win32" and _NONBLOCK:  # Windows: no O_NONBLOCK, set_blocking() rejects regular files
             os.set_blocking(fd, True)
         return io.FileIO(fd, "rb", closefd=True)
     except BaseException:

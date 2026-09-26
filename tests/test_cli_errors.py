@@ -44,7 +44,7 @@ NOW = "2026-09-11T00:00:00Z"
 HOSTS = ("web-1.example", "web-2.example", "web-3.example")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 RUNNER = CliRunner(
-    env={"HUSHWATCH_CONFIG": None, "HUSHWATCH_REDACT_KEY": None, "COLUMNS": "200", "LINES": "50", "TERM": "xterm"}
+    env={"HUSHWATCH_CONFIG": None, "HUSHWATCH_REDACT_KEY": None, "COLUMNS": "400", "LINES": "50", "TERM": "xterm"}
 )
 
 
