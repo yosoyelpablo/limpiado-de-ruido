@@ -56,6 +56,9 @@ hushwatch report alerts.json --lang es --redact -f html -o informe.html
 
 ## What it finds
 
+<img src="docs/img/report-noise.png" alt="Noise section: top rules with verdicts (tune, investigate, do not tune)" width="880">
+
+
 | Domain | What you get | Example |
 |---|---|---|
 | **Noise** | Scoped, gated, backtested tuning suggestions — plus ready-to-review Wazuh rules | *"Rule 5710 from the internal scanner 10.20.0.15 = 52% of the rule, every night for 21 days. Demoting it removes ~200 analyst-facing alerts/day and hides no high-severity alert — review required: brute-force rule 5712 counts these events."* |

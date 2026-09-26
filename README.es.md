@@ -57,6 +57,9 @@ hushwatch report alerts.json --lang es --redact -f html -o informe-compartible.h
 
 ## Qué encuentra
 
+<img src="docs/img/report-noise-es.png" alt="Sección de ruido: reglas principales con veredictos (ajustar, investigar, no ajustar)" width="880">
+
+
 | Dominio | Qué obtenés | Ejemplo |
 |---|---|---|
 | **Ruido** | Sugerencias de ajuste acotadas, con controles y backtest, más reglas de Wazuh listas para revisar | *"Regla 5710 desde el escáner interno 10.20.0.15 = 52% de la regla, todas las noches durante 21 días. Bajarle el nivel saca ~200 alertas por día de la vista del analista y no oculta ninguna alerta de severidad alta — requiere revisión: la regla de fuerza bruta 5712 cuenta estos eventos."* |
