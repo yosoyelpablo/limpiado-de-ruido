@@ -39,6 +39,7 @@ from ..i18n import render as render_message
 from ..models import DOMAINS, SCHEMA_VERSION, DataBasis, Finding, Report, Severity, is_empty
 from ..redact import Redactor
 from ..timeutil import UTC, humanize, parse_ts
+from .labels import ENUM_KEYS  # importing it registers the report.ev.* / report.val.* labels
 
 __all__ = [
     "DOMAIN_SECTIONS",
@@ -76,6 +77,7 @@ __all__ = [
     "fleet_rows",
     "incomplete_reasons",
     "is_alerts_only",
+    "is_audit",
     "iso_utc",
     "normalize_lang",
     "order_findings",
@@ -182,7 +184,10 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.section.silence": {"en": "Silence: what stopped reporting", "es": "Silencio: qué dejó de reportar"},
     "report.section.coverage": {"en": "Coverage", "es": "Cobertura"},
     "report.section.pipeline": {"en": "Pipeline health", "es": "Salud del pipeline"},
-    "report.section.tuning": {"en": "Tuning audit", "es": "Auditoría del tuning"},
+    "report.section.tuning": {
+        "en": "Tuning audit (existing suppressions)",
+        "es": "Auditoría de supresiones existentes",
+    },
     "report.section.findings": {"en": "All findings", "es": "Todos los hallazgos"},
     "report.section.other": {"en": "Other analyses", "es": "Otros análisis"},
     # data basis banner
@@ -197,6 +202,17 @@ _LABELS: dict[str, dict[str, str]] = {
         "es": "los datos terminan {duration} antes de generar este informe",
     },
     "report.basis.events": {"en": "Events analyzed", "es": "Eventos analizados"},
+    "report.basis.rules": {"en": "Rules parsed", "es": "Reglas analizadas"},
+    "report.basis.newest": {"en": "Newest event in the input", "es": "Evento más reciente de la entrada"},
+    "report.basis.excluded": {
+        "en": "Events outside the analysis window (read, not analyzed)",
+        "es": "Eventos fuera de la ventana de análisis (leídos, no analizados)",
+    },
+    "report.basis.excluded_newest": {"en": "the newest of them: {at}", "es": "el más reciente: {at}"},
+    "report.basis.skipped_files": {
+        "en": "Files skipped (not JSON, NDJSON or CSV)",
+        "es": "Archivos omitidos (no son JSON, NDJSON ni CSV)",
+    },
     "report.basis.malformed": {"en": "Malformed records", "es": "Registros mal formados"},
     "report.basis.bad_ts": {"en": "Unparseable timestamps", "es": "Marcas de tiempo ilegibles"},
     "report.basis.future_ts": {"en": "Future timestamps", "es": "Marcas de tiempo futuras"},
@@ -222,8 +238,8 @@ _LABELS: dict[str, dict[str, str]] = {
         "es": "Se alcanzaron límites: parte de la entrada no se analizó.",
     },
     "report.basis.reason.partial": {
-        "en": "{n} partial failure(s): some data could not be read.",
-        "es": "{n} fallo(s) parcial(es): no se pudieron leer algunos datos.",
+        "en": "{n} partial {n:plural:failure|failures}: some data could not be read.",
+        "es": "{n} {n:plural:fallo parcial|fallos parciales}: no se pudieron leer algunos datos.",
     },
     "report.basis.reason.assessment": {
         "en": "The assessment domain reports a problem.",
@@ -253,6 +269,15 @@ _LABELS: dict[str, dict[str, str]] = {
         "log_alert_level de Wazuh (3 por defecto). El silencio medido aquí es silencio de alertas, no de la "
         "fuente de logs: los hallazgos de silencio tienen confianza reducida y las fuentes que nunca generan "
         "alertas son invisibles.",
+    },
+    "report.caveat.alerts_only_generic": {
+        "en": "Alerts only: this input holds only detection-rule matches (alerts), not every log event. Silence "
+        "measured here is alert silence, not log-source silence, so silence findings carry reduced confidence and "
+        "quiet sources that never raise alerts are invisible.",
+        "es": "Solo alertas: esta entrada contiene únicamente coincidencias de reglas de detección (alertas), no "
+        "todos los eventos de los logs. El silencio medido aquí es silencio de alertas, no de la fuente de logs: "
+        "los hallazgos de silencio tienen confianza reducida y las fuentes que nunca generan alertas son "
+        "invisibles.",
     },
     "report.caveat.mixed": {
         "en": "Part of this input is alerts-only: for those sources, silence is alert silence, not log-source silence.",
@@ -290,7 +315,8 @@ _LABELS: dict[str, dict[str, str]] = {
         "es": "Análisis incompleto: vea los datos analizados más arriba.",
     },
     "report.card.count": {"en": "{n} {severity}", "es": "{severity}: {n}"},
-    "report.card.findings": {"en": "{n} finding(s)", "es": "{n} hallazgo(s)"},
+    "report.card.findings": {"en": "{n} {n:plural:finding|findings}", "es": "{n} {n:plural:hallazgo|hallazgos}"},
+    "report.card.not_evaluated": {"en": "Not evaluated: {what}", "es": "No evaluado: {what}"},
     # key numbers
     "report.kpi.events": {"en": "Events analyzed", "es": "Eventos analizados"},
     "report.kpi.analyst_facing": {"en": "Analyst-facing alerts per day", "es": "Alertas para analistas por día"},
@@ -299,11 +325,16 @@ _LABELS: dict[str, dict[str, str]] = {
         "es": "Volumen de alertas de las 5 reglas principales",
     },
     "report.kpi.tune": {"en": "Safe tuning candidates", "es": "Candidatos de ajuste seguros"},
-    "report.kpi.tune_hint": {"en": "review required: {n}", "es": "con revisión obligatoria: {n}"},
+    "report.kpi.tune_hint": {"en": "+{n} that require review", "es": "+{n} con revisión obligatoria"},
+    "report.kpi.index_hint": {
+        "en": "{n} index-volume only",
+        "es": "{n} solo de volumen del índice",
+    },
+    "report.kpi.rules": {"en": "Rules parsed", "es": "Reglas analizadas"},
     "report.kpi.silent": {"en": "Silent or dropped sources", "es": "Fuentes silenciosas o en caída"},
     "report.kpi.monitorable": {
         "en": "Critical sources monitorable within SLA",
-        "es": "Fuentes críticas monitorizables dentro del SLA",
+        "es": "Fuentes críticas monitoreables dentro del SLA",
     },
     "report.kpi.coverage": {"en": "Coverage gaps", "es": "Brechas de cobertura"},
     "report.kpi.risky": {"en": "Risky or expired suppressions", "es": "Supresiones riesgosas o vencidas"},
@@ -331,9 +362,9 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.col.trend": {"en": "Daily trend", "es": "Tendencia diaria"},
     "report.col.suggestion": {"en": "Suggestion", "es": "Sugerencia"},
     "report.col.scope": {"en": "Scope", "es": "Alcance"},
-    "report.col.hidden_per_day": {"en": "Hidden per day", "es": "Ocultas por día"},
+    "report.col.hidden_per_day": {"en": "Demoted per day", "es": "Degradadas por día"},
     "report.col.share_of_rule": {"en": "Share of rule", "es": "Proporción de la regla"},
-    "report.col.af_hidden": {"en": "Analyst-facing hidden", "es": "Ocultas para analistas"},
+    "report.col.af_hidden": {"en": "Analyst-facing demoted", "es": "Degradadas visibles para analistas"},
     "report.col.agents": {"en": "Agents", "es": "Agentes"},
     "report.col.expires": {"en": "Expires", "es": "Vence"},
     "report.col.review": {"en": "Review", "es": "Revisión"},
@@ -359,10 +390,10 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.col.worst": {"en": "Most severe finding", "es": "Hallazgo más grave"},
     # noise
     "report.noise.summary": {
-        "en": "{alerts} alerts over {days} days · {analyst_facing} analyst-facing · {rules} rules · "
-        "{clusters} clusters",
-        "es": "{alerts} alertas en {days} días · {analyst_facing} para analistas · {rules} reglas · "
-        "{clusters} clústeres",
+        "en": "{alerts} {alerts:plural:alert|alerts} over {days} days · {analyst_facing} analyst-facing · "
+        "{rules} {rules:plural:rule|rules} · {clusters} clusters",
+        "es": "{alerts} {alerts:plural:alerta|alertas} en {days} días · {analyst_facing} para analistas · "
+        "{rules} {rules:plural:regla|reglas} · {clusters} clústeres",
     },
     "report.noise.top_rules": {
         "en": "Top rules by analyst-facing volume",
@@ -386,15 +417,30 @@ _LABELS: dict[str, dict[str, str]] = {
         "Nunca los silencie a ciegas.",
     },
     "report.noise.none_investigate": {"en": "Nothing in this list.", "es": "Nada en esta lista."},
+    "report.noise.index_volume": {
+        "en": "Index volume only (no analyst sees these alerts)",
+        "es": "Solo volumen del índice (ningún analista ve estas alertas)",
+    },
+    "report.noise.index_volume_hint": {
+        "en": "These alerts are already below the analyst-facing level: demoting them changes nothing for analysts. "
+        "Keep them searchable unless index volume is a real problem.",
+        "es": "Estas alertas ya están por debajo del nivel visible para analistas: degradarlas no cambia nada para "
+        "ellos. Consérvelas para poder buscarlas, salvo que el volumen del índice sea un problema real.",
+    },
+    "report.noise.index_volume_badge": {"en": "Index volume", "es": "Volumen del índice"},
+    "report.noise.time_saved_none": {
+        "en": "none: no suggestion removes analyst-facing alerts",
+        "es": "ninguno: ninguna sugerencia quita alertas visibles para analistas",
+    },
     "report.noise.time_saved": {
         "en": "Time saved (upper-bound estimate)",
         "es": "Tiempo ahorrado (estimación máxima)",
     },
     "report.noise.time_saved_value": {"en": "{low}–{high} min/day", "es": "{low}–{high} min/día"},
     "report.noise.time_saved_hint": {
-        "en": "Upper-bound estimate: analyst-facing alert clusters hidden per day × minutes per alert. "
+        "en": "Upper-bound estimate: analyst-facing alert clusters demoted per day × minutes per alert. "
         "It is not a measured saving.",
-        "es": "Estimación máxima: clústeres de alertas para analistas ocultos por día × minutos por alerta. "
+        "es": "Estimación máxima: clústeres de alertas para analistas degradados por día × minutos por alerta. "
         "No es un ahorro medido.",
     },
     "report.noise.suppressions_file": {
@@ -404,6 +450,7 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.noise.no_rules": {"en": "No rule statistics.", "es": "Sin estadísticas de reglas."},
     "report.noise.totals": {"en": "Totals", "es": "Totales"},
     "report.verdict.tune": {"en": "Tune", "es": "Ajustar"},
+    "report.verdict.tune_scoped": {"en": "Tune (scoped)", "es": "Ajustar (con alcance)"},
     "report.verdict.investigate": {"en": "Investigate", "es": "Investigar"},
     "report.verdict.fix_at_source": {"en": "Fix at source", "es": "Corregir en origen"},
     "report.verdict.aggregate": {"en": "Aggregate", "es": "Agregar"},
@@ -414,7 +461,7 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.silence.counts": {"en": "Source status", "es": "Estado de las fuentes"},
     "report.silence.monitorability": {
         "en": "Critical sources monitorable within SLA",
-        "es": "Fuentes críticas monitorizables dentro del SLA",
+        "es": "Fuentes críticas monitoreables dentro del SLA",
     },
     "report.silence.monitorability_value": {"en": "{pct} ({part} of {total})", "es": "{pct} ({part} de {total})"},
     "report.silence.no_critical": {
@@ -439,7 +486,10 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.sstatus.drop": {"en": "Drop", "es": "Caída"},
     "report.sstatus.decay": {"en": "Decay", "es": "Declive"},
     "report.sstatus.learning": {"en": "Learning", "es": "Aprendiendo"},
-    "report.sstatus.unmonitorable": {"en": "Unmonitorable", "es": "No monitorizable"},
+    "report.sstatus.unmonitorable": {
+        "en": "Unmonitorable",
+        "es": "No monitoreable",
+    },
     "report.sstatus.explained": {"en": "Explained", "es": "Explicada"},
     "report.sstatus.rule_dark": {"en": "Rule dark", "es": "Regla apagada"},
     "report.sstatus.field_lost": {"en": "Field lost", "es": "Campo perdido"},
@@ -505,7 +555,10 @@ _LABELS: dict[str, dict[str, str]] = {
         "en": "No findings, but the analysis was incomplete: this is not an all-clear.",
         "es": "Sin hallazgos, pero el análisis estuvo incompleto: esto no significa que todo esté bien.",
     },
-    "report.findings.summary": {"en": "{n} findings", "es": "{n} hallazgos"},
+    "report.findings.summary": {
+        "en": "{n} {n:plural:finding|findings}",
+        "es": "{n} {n:plural:hallazgo|hallazgos}",
+    },
     "report.finding.why": {"en": "Why", "es": "Por qué"},
     "report.finding.evidence": {"en": "Evidence", "es": "Evidencia"},
     "report.finding.recommendation": {"en": "Recommended action", "es": "Acción recomendada"},
@@ -514,9 +567,48 @@ _LABELS: dict[str, dict[str, str]] = {
     "report.finding.subject": {"en": "Subject", "es": "Elemento"},
     "report.finding.kind": {"en": "Kind", "es": "Tipo"},
     "report.finding.related": {"en": "Related", "es": "Relacionados"},
+    "report.finding.explained": {
+        "en": "Also explains (same incident, not reported separately)",
+        "es": "También explica (mismo incidente, no se informa por separado)",
+    },
+    "report.gate.passed": {"en": "✓ passed", "es": "✓ superado"},
+    "report.gate.tripped": {"en": "✗ tripped", "es": "✗ disparado"},
+    "report.no_events": {"en": "no events", "es": "sin eventos"},
+    "report.seconds": {"en": "{value} s", "es": "{value} s"},
+    "report.fmt.alerts": {"en": "{count} {n:plural:alert|alerts}", "es": "{count} {n:plural:alerta|alertas}"},
+    "report.fmt.alerts_of": {
+        "en": "{who} ({count} {n:plural:alert|alerts})",
+        "es": "{who} ({count} {n:plural:alerta|alertas})",
+    },
+    "report.fmt.beaconing": {"en": " · beacon-like", "es": " · patrón de beacon"},
+    "report.fmt.active_hours": {
+        "en": "{who}: active {active} of {span} hours, regularity {regularity}{beacon}",
+        "es": "{who}: activa {active} de {span} horas, regularidad {regularity}{beacon}",
+    },
+    "report.fmt.path": {
+        "en": "{path} ({alerts}, changed on {days} days)",
+        "es": "{path} ({alerts}, con cambios en {days} días)",
+    },
+    "report.fmt.lag": {
+        "en": "{who}: median {p50}, p95 {p95} ({samples} samples)",
+        "es": "{who}: mediana {p50}, p95 {p95} ({samples} muestras)",
+    },
+    "report.fmt.event_type": {
+        "en": "{check}: never sent by {missing} of {peers} comparable peers, stopped on {stopped}",
+        "es": "{check}: {missing} de {peers} pares comparables nunca lo enviaron; se detuvo en {stopped}",
+    },
+    "report.fmt.precursor": {
+        "en": "{what} on {agent} at {ts} (rule {rule}, ATT&CK {technique})",
+        "es": "{what} en {agent} a las {ts} (regla {rule}, ATT&CK {technique})",
+    },
+    "report.fmt.event_type_na": {
+        "en": "{check}: not assessed (no comparable peers)",
+        "es": "{check}: no evaluado (sin pares comparables)",
+    },
     "report.finding.more": {
-        "en": "{n} more finding(s) not shown here (use --verbose, or the HTML/JSON report).",
-        "es": "{n} hallazgos más no se muestran aquí (use --verbose o el informe HTML/JSON).",
+        "en": "{n} more {n:plural:finding is|findings are} not shown here (use --verbose, or the HTML/JSON report).",
+        "es": "{n} {n:plural:hallazgo más no se muestra|hallazgos más no se muestran} aquí (use --verbose "
+        "o el informe HTML/JSON).",
     },
     # sparkline
     "report.spark.label": {
@@ -558,104 +650,6 @@ _LABELS: dict[str, dict[str, str]] = {
     },
 }
 
-# Labels for common evidence keys; unknown keys are shown humanized ("hidden_per_day" -> "hidden per day").
-_EVIDENCE_LABELS: dict[str, tuple[str, str]] = {
-    "observed": ("Observed", "Observado"),
-    "expected": ("Expected", "Esperado"),
-    "p": ("p-value", "Valor p"),
-    "p0": ("P(no events)", "P(sin eventos)"),
-    "p_value": ("p-value", "Valor p"),
-    "pvalue": ("p-value", "Valor p"),
-    "gap": ("Gap", "Hueco"),
-    "gap_hours": ("Gap (hours)", "Hueco (horas)"),
-    "last_seen": ("Last seen", "Visto por última vez"),
-    "first_seen": ("First seen", "Visto por primera vez"),
-    "duty": ("Activity pattern", "Patrón de actividad"),
-    "tier": ("Tier", "Criticidad"),
-    "share": ("Share", "Proporción"),
-    "per_day": ("Per day", "Por día"),
-    "total": ("Total", "Total"),
-    "level": ("Level", "Nivel"),
-    "rule_id": ("Rule", "Regla"),
-    "rule": ("Rule", "Regla"),
-    "rule_level": ("Rule level", "Nivel de la regla"),
-    "agent": ("Agent", "Agente"),
-    "agents": ("Agents", "Agentes"),
-    "agents_affected": ("Agents affected", "Agentes afectados"),
-    "host": ("Host", "Equipo"),
-    "hosts": ("Hosts", "Equipos"),
-    "count": ("Count", "Cantidad"),
-    "days": ("Days", "Días"),
-    "days_active": ("Days active", "Días activos"),
-    "window": ("Window", "Ventana"),
-    "baseline": ("Baseline", "Línea base"),
-    "ratio": ("Ratio", "Cociente"),
-    "hidden_per_day": ("Hidden per day", "Ocultas por día"),
-    "hidden_total": ("Hidden in total", "Ocultas en total"),
-    "share_of_rule": ("Share of rule", "Proporción de la regla"),
-    "hidden_analyst_facing": ("Analyst-facing hidden", "Ocultas para analistas"),
-    "analyst_facing": ("Analyst-facing", "Para analistas"),
-    "clusters": ("Clusters", "Clústeres"),
-    "clusters_per_day": ("Clusters per day", "Clústeres por día"),
-    "dependents": ("Dependent rules", "Reglas dependientes"),
-    "conditions": ("Conditions", "Condiciones"),
-    "expires": ("Expires", "Vence"),
-    "reproduce": ("Reproduce", "Reproducir"),
-    "query": ("Query", "Consulta"),
-    "examples": ("Examples", "Ejemplos"),
-    "precursor": ("Precursor", "Precursor"),
-    "precursors": ("Precursors", "Precursores"),
-    "techniques": ("ATT&CK techniques", "Técnicas ATT&CK"),
-    "mitre": ("ATT&CK", "ATT&CK"),
-    "log_source": ("Log source", "Fuente de logs"),
-    "source": ("Source", "Fuente"),
-    "status": ("Status", "Estado"),
-    "last_keepalive": ("Last keepalive", "Último keepalive"),
-    "lag_p95": ("Lag p95", "Retraso p95"),
-    "future_timestamps": ("Future timestamps", "Marcas de tiempo futuras"),
-    "dropped": ("Dropped", "Descartados"),
-    "fp_rate": ("False-positive rate", "Tasa de falsos positivos"),
-    "dispositions": ("Dispositions", "Disposiciones"),
-    "action": ("Action", "Acción"),
-    "review_required": ("Review required", "Requiere revisión"),
-    "alpha_eff": ("Alarm threshold (α)", "Umbral de alarma (α)"),
-    "presence_before": ("Presence before", "Presencia antes"),
-    "presence_after": ("Presence after", "Presencia después"),
-    "field": ("Field", "Campo"),
-    "value": ("Value", "Valor"),
-    "events": ("Events", "Eventos"),
-    "file": ("File", "Archivo"),
-    "path": ("Path", "Ruta"),
-    "platform": ("Platform", "Plataforma"),
-    "peers": ("Peers", "Pares"),
-    "peer_share": ("Share of peers", "Proporción de pares"),
-    "contract": ("Contract", "Contrato"),
-    "event_code": ("Event code", "Código de evento"),
-    "missing": ("Missing", "Ausente"),
-    "version": ("Version", "Versión"),
-    "daily": ("Daily counts", "Conteos diarios"),
-    "reporting": ("Reporting", "Reportando"),
-    "peer_group": ("Peer group", "Grupo de pares"),
-    "inventory": ("Inventory", "Inventario"),
-    "matched": ("Matched", "Coincidentes"),
-    "present": ("Present", "Presentes"),
-    "silent": ("Silent", "Silenciosas"),
-    "basis": ("Basis", "Base"),
-    "name": ("Name", "Nombre"),
-    "min_events_per_day": ("Min. events per day", "Mín. de eventos por día"),
-    "hidden": ("Hidden", "Ocultas"),
-    "hidden_high": ("High-level hidden", "Ocultas de nivel alto"),
-    "tp_hidden": ("True positives hidden", "Verdaderos positivos ocultos"),
-    "share_of_analyst_facing": ("Share of analyst-facing", "Proporción para analistas"),
-    "analyst_facing_clusters_per_day": ("Analyst-facing clusters per day", "Clústeres para analistas por día"),
-    "backtest": ("Backtest", "Backtest"),
-    "gates": ("Safety gates", "Controles de seguridad"),
-    "verdict": ("Verdict", "Veredicto"),
-    "series": ("Series", "Serie"),
-}
-
-for _key, (_en, _es) in _EVIDENCE_LABELS.items():
-    _LABELS[f"report.ev.{_key}"] = {"en": _en, "es": _es}
 register(_LABELS)
 
 _VERDICTS = ("tune", "investigate", "fix_at_source", "aggregate", "do_not_tune", "watch", "learning")
@@ -1135,7 +1129,7 @@ class RenderContext:
             return self.t("report.dash")
         if isinstance(value, Mapping):
             items = list(value.items())
-            parts = [f"{self.text(str(k))}: {self.value(v, None, _depth + 1)}" for k, v in items[:_MAX_ITEMS]]
+            parts = [f"{self.evidence_label(str(k))}: {self.value(v, None, _depth + 1)}" for k, v in items[:_MAX_ITEMS]]
             if len(items) > _MAX_ITEMS:
                 parts.append(self.t("report.more_items", n=self.num(len(items) - _MAX_ITEMS)))
             return _cut("; ".join(parts), limit if limit is not None else MAX_TEXT)
@@ -1188,8 +1182,10 @@ class RenderContext:
         percent = number * 100 if number <= 1 else number
         if not math.isfinite(percent):
             return "∞%" if percent > 0 else "-∞%"
+        if 0 < percent < 0.1:
+            return self._localize("<0.1%")  # never "0%" for a share that is not zero
         if 0 < percent < 1:
-            return self._localize("<1%")
+            return self._localize(f"{percent:.1f}%")
         if 99 < percent < 100:
             return self._localize(">99%")
         return f"{self.num(round(percent))}%"
@@ -1229,12 +1225,13 @@ class RenderContext:
         except (OverflowError, ValueError, TypeError):
             return self.t("report.unknown")
 
-    def evidence_label(self, key: str) -> str:
-        """Label for an evidence/section key: registered ``report.ev.<key>`` text, else the key redacted first and
-        then humanized (a key can be an identifier: ``{"dc01.corp.example": 5}``)."""
-        registered = f"report.ev.{key}"
-        if has(registered):
-            return self.t(registered)
+    def evidence_label(self, key: str, parent: str | None = None) -> str:
+        """Label for an evidence/section key: registered ``report.ev.<parent>.<key>`` / ``report.ev.<key>`` text,
+        or the label of an enumerated value used as a key (``{"investigate": 5}``, ``{"active": 36}``), else the
+        key redacted first and then humanized (a key can be an identifier: ``{"dc01.corp.example": 5}``)."""
+        for registered in _label_keys(key, parent):
+            if has(registered):
+                return self.t(registered)
         processed = self.text(key)
         label = _humanize_key(processed)
         if processed == key and _PLAIN_KEY.match(key):  # a code-style key such as "days_present"
@@ -1470,6 +1467,7 @@ class DomainCard:
     status_label: str
     counts: dict[str, int]
     detail: str
+    notes: list[str] = field(default_factory=list)  # parts of the domain that could not be evaluated
 
 
 @dataclass(slots=True)
@@ -1503,7 +1501,7 @@ class FindingView:
     reasons: list[str]
     evidence: list[EvidenceRow]
     recommendation: str
-    related: list[str]
+    explained: list[str]  # other findings this one explains (folded into it: same incident)
     review_required: bool
 
 
@@ -1574,6 +1572,7 @@ class NoiseView:
     rules_more: int
     tune: list[TuneRow]
     investigate: list[InvestigateRow]
+    index_volume: list[InvestigateRow]  # scopes that only add index volume: nothing to gain for analysts
     time_saved: str
     suppressions_file: str
     extra: list[Fact]
@@ -1642,6 +1641,38 @@ def _record_table(
     return RecordTable([ctx.evidence_label(k) for k in keys], rows, max(0, len(items) - max_rows))
 
 
+# Expected-sources columns, in reading order: Matched = Present + Missing + Silent + Not assessed / explained.
+_EXPECTED_COLUMNS = ("basis", "name", "log_source", "matched", "present", "missing", "silent", "not_assessed")
+
+
+def _expected_table(ctx: RenderContext, items: Sequence[Mapping[str, Any]], max_rows: int = 60) -> RecordTable | None:
+    """The expected-sources table (contracts and peer groups) with every host accounted for in a column."""
+    if not items:
+        return None
+    keys = [k for k in _EXPECTED_COLUMNS if any(k in item for item in items)]
+    if any(_as_float(item.get("low")) for item in items):
+        keys.append("low")
+    if any(item.get("min_events_per_day") is not None for item in items):
+        keys.append("min_events_per_day")
+    skip = {*keys, "not_assessed_hosts", "low", "min_events_per_day"}
+    keys += list(dict.fromkeys(str(k) for item in items for k in item if str(k) not in skip))  # never dropped
+    rows: list[list[str]] = []
+    for item in items[:max_rows]:
+        row = []
+        for key in keys:
+            text = _evidence_value(ctx, key, item.get(key))
+            if key == "name" and item.get("basis") == "peers":  # a peer group is named after its platform
+                text = _enum_text(ctx, "platform", str(item.get(key))) or text
+            hosts = _as_list(item.get("not_assessed_hosts"))
+            if key == "not_assessed" and hosts:
+                names = ", ".join(ctx.value(h, 120) for h in hosts[:5])
+                more = f" {ctx.t('report.more_items', n=ctx.num(len(hosts) - 5))}" if len(hosts) > 5 else ""
+                text = f"{text} ({names}{more})"
+            row.append(text)
+        rows.append(row)
+    return RecordTable([ctx.evidence_label(k) for k in keys], rows, max(0, len(items) - max_rows))
+
+
 @dataclass(slots=True)
 class CoverageView:
     assessed: bool
@@ -1705,49 +1736,64 @@ class ReportView:
     total_findings: int
     severity_counts: dict[str, int]
     footer: list[str]
+    audit: bool = False  # a ruleset audit: only the tuning audit applies (no events, no period)
 
 
 def _anchor(fingerprint: str) -> str:
     return "f-" + (re.sub(r"[^A-Za-z0-9_-]", "", fingerprint)[:40] or "x")
 
 
-def _generic_facts(ctx: RenderContext, section: Mapping[str, Any], consumed: Iterable[str]) -> list[Fact]:
-    """Keys of a section that no dedicated view consumed: never dropped silently."""
+def _generic_facts(
+    ctx: RenderContext, section: Mapping[str, Any], consumed: Iterable[str], parent: str | None = None
+) -> list[Fact]:
+    """Keys of a section that no dedicated view consumed: never dropped silently, always labelled."""
     skip = set(consumed)
     facts: list[Fact] = []
     for key, value in section.items():
         if key in skip:
             continue
         name = str(key)
-        if isinstance(value, Mapping):
-            items = [f"{ctx.evidence_label(str(k))}: {ctx.value(v, 300)}" for k, v in list(value.items())[:40]]
-            facts.append(Fact(ctx.evidence_label(name), "", items=items, more=max(0, len(value) - 40)))
-        elif isinstance(value, (list, tuple)) and not _is_series(name, value):
-            items = [ctx.value(v, 300) for v in list(value)[:40]]
-            facts.append(Fact(ctx.evidence_label(name), ctx.num(len(value)), items=items, more=max(0, len(value) - 40)))
+        label = ctx.evidence_label(name, parent)
+        if isinstance(value, Mapping) and value and name.lower() not in _SCOPE_KEYS and name != "top_anchor":
+            scope = parent if parent and any(has(f"report.ev.{parent}.{k}") for k in value) else name
+            items = [
+                f"{ctx.evidence_label(str(k), scope)}: {_evidence_value(ctx, str(k), v, name)}"
+                for k, v in list(value.items())[:40]
+            ]
+            facts.append(Fact(label, "", items=items, more=max(0, len(value) - 40)))
+        elif isinstance(value, (list, tuple)) and value and not _is_series(name, value):
+            items = _list_items(ctx, name, list(value)[:40], parent)
+            facts.append(Fact(label, ctx.num(len(value)), items=items, more=max(0, len(value) - 40)))
         else:
-            facts.append(Fact(ctx.evidence_label(name), ctx.value(value, 500)))
+            facts.append(Fact(label, _cut(_evidence_value(ctx, name, value, parent), 500)))
     return facts
+
+
+# Evidence keys shown elsewhere in a finding view (or redundant with another key), never as evidence rows.
+_HIDDEN_EVIDENCE = frozenset({"explained", "time_saved_kind"})
 
 
 def _finding_view(ctx: RenderContext, finding: Finding) -> FindingView:
     severity = _severity_value(finding.severity)
     confidence = str(getattr(finding.confidence, "value", finding.confidence) or "medium").lower()
     evidence: list[EvidenceRow] = []
-    items = list(_as_map(finding.evidence).items())
+    raw = _as_map(finding.evidence)
+    items = [(k, v) for k, v in raw.items() if str(k) not in _HIDDEN_EVIDENCE]
+    if "gap" in raw:  # "gap_seconds" is the same duration as "gap", only less readable
+        items = [(k, v) for k, v in items if str(k) != "gap_seconds"]
     shown = 0
     for key, value in items:
         if len(evidence) >= _MAX_EVIDENCE_ROWS:
             break
         shown += 1
         name = str(key)
-        if isinstance(value, Mapping) and value and name.lower() not in _SCOPE_KEYS:
-            # one level of nesting (e.g. "backtest": {...}) becomes labelled rows: "Backtest › Hidden per day"
+        if isinstance(value, Mapping) and value and name.lower() not in _SCOPE_KEYS and name not in _INLINE_MAPS:
+            # one level of nesting (e.g. "backtest": {...}) becomes labelled rows: "Backtest › Demoted per day"
             parent = ctx.evidence_label(name)
             for sub_key, sub_value in list(value.items())[: _MAX_EVIDENCE_ROWS - len(evidence)]:
                 sub_name = str(sub_key)
-                label = f"{parent} › {ctx.evidence_label(sub_name)}"
-                evidence.append(_evidence_row(ctx, f"{name}.{sub_name}", sub_name, sub_value, label))
+                label = f"{parent} › {ctx.evidence_label(sub_name, name)}"
+                evidence.append(_evidence_row(ctx, f"{name}.{sub_name}", sub_name, sub_value, label, name))
         else:
             evidence.append(_evidence_row(ctx, name, name, value, ctx.evidence_label(name)))
     if shown < len(items):
@@ -1757,6 +1803,8 @@ def _finding_view(ctx: RenderContext, finding: Finding) -> FindingView:
     reasons = [ctx.msg(r, 1000) for r in all_reasons[:30]]
     if len(all_reasons) > 30:
         reasons.append(ctx.t("report.more_items", n=ctx.num(len(all_reasons) - 30)))
+    explained_raw = raw.get("explained")
+    explained = [ctx.value(e, 400) for e in _as_list(explained_raw)[:50]]
     return FindingView(
         fingerprint=ctx.text(finding.fingerprint, 64),
         anchor=_anchor(str(finding.fingerprint)),
@@ -1771,38 +1819,228 @@ def _finding_view(ctx: RenderContext, finding: Finding) -> FindingView:
         reasons=reasons,
         evidence=evidence,
         recommendation=ctx.msg(finding.recommendation, 1500),
-        related=[ctx.text(r, 64) for r in _as_list(finding.related)[:20]],
+        explained=explained,
         review_required=str(finding.domain) == "noise" and _review_required(finding),
     )
 
 
-_PERCENT_KEYS = frozenset({"share", "share_of_rule", "peer_share", "presence_before", "presence_after", "fp_rate"})
-_PVALUE_KEYS = frozenset({"p", "p0", "p_value", "pvalue", "alpha", "alpha_eff", "cdf"})
+_PERCENT_KEYS = frozenset(
+    {
+        "share",
+        "share_of_rule",
+        "peer_share",
+        "presence_before",
+        "presence_after",
+        "fp_rate",
+        "fp_lower_bound",
+        "regularity",
+        "before",
+        "after",
+        "peer_coverage",
+        "top5_share",
+        "off_day_probability",
+        "low_day_probability",
+    }
+)
+_PVALUE_KEYS = frozenset({"p", "p0", "p_value", "pvalue", "q", "alpha", "alpha_eff", "cdf"})
 _SCOPE_KEYS = frozenset({"conditions", "condition", "scope"})
+_SECONDS_KEYS = frozenset({"gap_seconds", "threshold_seconds", "p50_seconds", "p95_seconds", "lag_seconds"})
+# Nested mappings rendered inline as one value instead of one evidence row per key.
+_INLINE_MAPS = frozenset({"top_anchor", "levels", "filter", "anchor"})
 
 
 _MAX_EVIDENCE_ROWS = 40
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_SUFFIXES = ("_seen", "_at", "_time", "keepalive", "_event")
+_TIME_KEYS = frozenset({"since", "data_end", "evaluated_until", "from", "to", "start", "end", "ts"})
 
 
-def _evidence_row(ctx: RenderContext, path: str, key: str, value: Any, label: str) -> EvidenceRow:
+def _evidence_row(
+    ctx: RenderContext, path: str, key: str, value: Any, label: str, parent: str | None = None
+) -> EvidenceRow:
     if _is_series(key, value):
         series = _series(value)
         return EvidenceRow(ctx.text(path, 80), label, ctx.spark_summary(series), series)
-    return EvidenceRow(ctx.text(path, 80), label, _evidence_value(ctx, key, value))
+    return EvidenceRow(ctx.text(path, 80), label, _evidence_value(ctx, key, value, parent))
 
 
-def _evidence_value(ctx: RenderContext, key: str, value: Any) -> str:
-    """Evidence values formatted by what their key means (shares as %, p-values, conditions, timestamps)."""
+def _label_keys(key: str, parent: str | None) -> list[str]:
+    """Catalog keys that can label ``key`` (under ``parent``), most specific first."""
+    keys = [f"report.ev.{parent}.{key}"] if parent else []
+    keys.append(f"report.ev.{key}")
+    if parent in ("verdicts", "verdict_counts"):
+        keys.append(f"report.verdict.{key}")
+    elif parent == "status_counts":
+        keys.append(f"report.sstatus.{key}")
+    elif parent == "by_status":
+        keys.append(f"report.agent.{key}")
+    keys.append(f"report.val.{key}")
+    return keys
+
+
+def _enum_text(ctx: RenderContext, key: str, value: str) -> str | None:
+    """The label of an enumerated value (``investigate`` -> "Investigar"), or None when it is not one."""
+    candidates = [f"report.val.{key}.{value}"]
+    prefixes = {
+        "verdict": ("report.verdict",),
+        "status": ("report.sstatus", "report.val", "status"),
+        "agent_status": ("report.val",),
+        "tier": ("report.tier",),
+        "duty": ("report.duty",),
+        "level": ("report.level",),
+        "input_kind": ("report.input",),
+        "basis": ("report.val", "report.input"),
+        "now_origin": ("report.now_origin",),
+        "check": ("report.check", "report.val"),
+        "not_evaluated": ("domain",),
+    }
+    candidates += [f"{prefix}.{value}" for prefix in prefixes.get(key, ("report.val",))]
+    for candidate in candidates:
+        if has(candidate):
+            return ctx.t(candidate)
+    return None
+
+
+def _seconds_text(ctx: RenderContext, seconds: float) -> str:
+    if abs(seconds) < 60:
+        return ctx.t("report.seconds", value=ctx.num(round(seconds, 1)))
+    return ctx.dur(seconds)
+
+
+def _count_text(ctx: RenderContext, template: str, number: Any, **params: str) -> str:
+    """A labelled count whose noun agrees with the number ("1 alert", "2 alerts")."""
+    plural = number if _as_float(number) is not None else 0
+    return sanitize(render_message(M(template, n=plural, **params), ctx.lang))
+
+
+def _record_text(ctx: RenderContext, parent: str, item: Mapping[str, Any]) -> str:
+    """One record of a list (``{"entity": ..., "alerts": 2}``) as a readable line."""
+    keys = set(item)
+    if "entity" in keys or ("host" in keys and keys <= {"host", "alerts"}):
+        who = ctx.value(item.get("entity", item.get("host")), 200)
+        if keys <= {"entity", "host", "alerts"}:
+            return _count_text(
+                ctx, "report.fmt.alerts_of", item.get("alerts"), who=who, count=ctx.num(item.get("alerts"))
+            )
+        if {"active_hours", "span_hours"} <= keys:
+            beacon = ctx.t("report.fmt.beaconing") if item.get("beaconing") else ""
+            return ctx.t(
+                "report.fmt.active_hours",
+                who=who,
+                active=ctx.num(item.get("active_hours")),
+                span=ctx.num(item.get("span_hours")),
+                regularity=ctx.pct(item.get("regularity")),
+                beacon=beacon,
+            ).strip()
+    if "path" in keys and "alerts" in keys:
+        return ctx.t(
+            "report.fmt.path",
+            path=ctx.value(item.get("path"), 300),
+            alerts=_count_text(ctx, "report.fmt.alerts", item.get("alerts"), count=ctx.num(item.get("alerts"))),
+            days=ctx.num(item.get("days_present")),
+        )
+    if parent == "worst" and "p95_seconds" in keys:
+        p50, p95 = _as_float(item.get("p50_seconds")), _as_float(item.get("p95_seconds"))
+        text = ctx.t(
+            "report.fmt.lag",
+            who=ctx.value(item.get("agent", item.get("source")), 200),
+            p50=_seconds_text(ctx, p50) if p50 is not None else ctx.t("report.dash"),
+            p95=_seconds_text(ctx, p95) if p95 is not None else ctx.t("report.dash"),
+            samples=ctx.num(item.get("samples")),
+        )
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind != "ok":
+            text += f" · {_enum_text(ctx, 'kind', kind) or ctx.text(kind, 40)}"
+        return text
+    if parent == "precursors" and "code" in keys:
+        code = str(item.get("code"))
+        what = ctx.t(f"silence.precursor.{code}") if has(f"silence.precursor.{code}") else ctx.text(code, 60)
+        return ctx.t(
+            "report.fmt.precursor",
+            what=what,
+            agent=ctx.value(item.get("agent"), 120),
+            ts=ctx.dt(item.get("ts")),
+            rule=ctx.value(item.get("rule_id"), 20),
+            technique=ctx.value(item.get("technique"), 40),
+        )
+    if parent == "event_types" and "check" in keys:
+        name = _enum_text(ctx, "check", str(item.get("check"))) or ctx.text(item.get("check"), 60)
+        if not item.get("assessed"):
+            return ctx.t("report.fmt.event_type_na", check=name)
+        return ctx.t(
+            "report.fmt.event_type",
+            check=name,
+            peers=ctx.num(item.get("peers")),
+            missing=ctx.num(item.get("missing")),
+            stopped=ctx.num(item.get("stopped")),
+        )
+    parts = [
+        f"{ctx.evidence_label(str(k), parent)}: {_evidence_value(ctx, str(k), v, parent)}"
+        for k, v in list(item.items())[:_MAX_ITEMS]
+        if v not in (None, "", [], {})
+    ]
+    return " · ".join(parts) or ctx.t("report.dash")
+
+
+def _list_items(ctx: RenderContext, key: str, values: Sequence[Any], parent: str | None = None) -> list[str]:
+    """The items of a list value, each as display text (records as readable lines, enums translated)."""
+    out: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            out.append(_cut(_record_text(ctx, key, value), 600))
+        elif isinstance(value, str) and key in ENUM_KEYS:
+            out.append(_enum_text(ctx, key, value) or ctx.text(value, 300))
+        else:
+            out.append(ctx.value(value, 300))
+    return out
+
+
+def _evidence_value(ctx: RenderContext, key: str, value: Any, parent: str | None = None) -> str:
+    """Evidence values formatted by what their key means (shares as %, p-values, conditions, timestamps, gate
+    results, enumerated values and records as readable text)."""
     lowered = key.lower()
+    if parent == "gates" and isinstance(value, bool):
+        return ctx.t("report.gate.passed" if value else "report.gate.tripped")
     number = _as_float(value)
     if number is not None and (lowered in _PERCENT_KEYS or lowered.endswith(("_share", "_rate"))) and 0 <= number <= 1:
         return ctx.pct(number)
     if number is not None and lowered in _PVALUE_KEYS:
         return ctx.pvalue(number)
-    if lowered in _SCOPE_KEYS and value is not None:
+    if number is not None and lowered in _SECONDS_KEYS:
+        return _seconds_text(ctx, number)
+    if lowered in _SCOPE_KEYS and value is not None and not isinstance(value, (int, float)):
         return _cut(_scope_text(ctx, value), 1000)
-    if isinstance(value, str) and (lowered.endswith(("_seen", "_at", "_time", "keepalive")) or lowered == "since"):
+    if lowered == "filter" and isinstance(value, Mapping):
+        # field paths stay as they are (they go into a SIEM query); pseudo-fields such as "log_source" get a label
+        parts = [
+            f"{ctx.text(str(k), 80) if '.' in str(k) else ctx.evidence_label(str(k))} = {ctx.value(v, 160)}"
+            for k, v in list(value.items())[:6]
+        ]
+        return _cut(" ∧ ".join(parts), 1000)
+    if lowered in ("top_anchor", "anchor") and isinstance(value, Mapping):
+        return _anchor_text(ctx, value)
+    if value is None and lowered in ("last_event", "last_seen"):
+        return ctx.t("report.no_events")
+    if isinstance(value, str) and _DATE_ONLY.match(value):
+        return value  # a calendar day: no invented midnight
+    if isinstance(value, str) and (lowered.endswith(_TIME_SUFFIXES) or lowered in _TIME_KEYS):
         return ctx.dt(value)
+    if isinstance(value, str) and lowered in ENUM_KEYS:
+        return _enum_text(ctx, lowered, value) or ctx.text(value, 1000)
+    if isinstance(value, Mapping) and value:
+        parts = [
+            f"{ctx.evidence_label(str(k), key)}: {_evidence_value(ctx, str(k), v, key)}"
+            for k, v in list(value.items())[:_MAX_ITEMS]
+        ]
+        if len(value) > _MAX_ITEMS:
+            parts.append(ctx.t("report.more_items", n=ctx.num(len(value) - _MAX_ITEMS)))
+        return _cut(" · ".join(parts), 1000)
+    if isinstance(value, (list, tuple)) and value:
+        items = _list_items(ctx, key, list(value)[:_MAX_ITEMS], parent)
+        if len(value) > _MAX_ITEMS:
+            items.append(ctx.t("report.more_items", n=ctx.num(len(value) - _MAX_ITEMS)))
+        separator = "; " if any(isinstance(v, Mapping) for v in value) else ", "
+        return _cut(separator.join(items), 1000)
     return ctx.value(value, 1000)
 
 
@@ -1816,16 +2054,25 @@ def _review_required(finding: Finding) -> bool:
     )
 
 
+def is_audit(report: Report) -> bool:
+    """True for an ``audit`` report: the input was a Wazuh ruleset, not events."""
+    return str(report.data_basis.input_kind) == "ruleset"
+
+
+_WAZUH_PROFILES = frozenset({"wazuh4", "wazuh5"})
+
+
 def basis_caveats(ctx: RenderContext, report: Report) -> list[str]:
     """Caveats about what the input can support (alerts-only input, Wazuh 5.x, sampling, minor gaps)."""
     basis = report.data_basis
     kind = str(basis.input_kind or "unknown")
+    wazuh = str(basis.profile) in _WAZUH_PROFILES
     caveats: list[str] = []
     if kind in _ALERTS_ONLY_KINDS:
-        caveats.append(ctx.t("report.caveat.alerts_only"))
+        caveats.append(ctx.t("report.caveat.alerts_only" if wazuh else "report.caveat.alerts_only_generic"))
     elif kind == "mixed":
         caveats.append(ctx.t("report.caveat.mixed"))
-    elif kind not in _INPUT_KINDS or kind == "unknown":
+    elif (kind not in _INPUT_KINDS or kind == "unknown") and not is_audit(report):
         caveats.append(ctx.t("report.caveat.unknown"))
     if str(basis.profile) == "wazuh5":
         caveats.append(ctx.t("report.caveat.wazuh5"))
@@ -1837,12 +2084,18 @@ def basis_caveats(ctx: RenderContext, report: Report) -> list[str]:
     return caveats
 
 
+def _failure_text(ctx: RenderContext, value: Any) -> str:
+    """A partial failure: a translatable :class:`Message` (rendered in the report language) or plain text."""
+    return ctx.msg(value, 500) if isinstance(value, Message) else ctx.text(value, 500)
+
+
 def _basis_view(ctx: RenderContext, report: Report, statuses: Mapping[str, str]) -> BasisView:
     basis = report.data_basis
     reasons = incomplete_reasons(ctx, report, statuses)
     kind = str(basis.input_kind or "unknown")
     profile = str(basis.profile or "unknown")
     caveats = basis_caveats(ctx, report)
+    audit = is_audit(report)
 
     def count_fact(label: str, raw: Any, bad: str) -> Fact:
         value = _count(raw)
@@ -1859,35 +2112,54 @@ def _basis_view(ctx: RenderContext, report: Report, statuses: Mapping[str, str])
             ctx.label("report.profile", profile),
             "warn" if profile == "wazuh5" else "normal",
         ),
-        Fact(
-            ctx.t("report.basis.range"),
-            _range_text(ctx, basis.start, basis.end),
-            "normal" if basis.start else "warn",
-            span=2,
-        ),
     ]
-    if basis.now is not None:
-        now_text = f"{ctx.dt(basis.now)} · {ctx.label('report.now_origin', basis.now_origin)}"
-        facts.append(Fact(ctx.t("report.basis.now"), now_text, span=2))
-        age = _safe_delta(report.generated_at, basis.now)
+    if audit:  # a ruleset has no time range, no "now" and no events: say what was actually read
+        rules = _as_int(_section(report, "tuning").get("rules_parsed"))
+        count = rules if rules is not None else _count(basis.events)
+        facts.append(Fact(ctx.t("report.basis.rules"), ctx.num(count), "fail" if count <= 0 else "normal"))
+    else:
+        facts.append(
+            Fact(
+                ctx.t("report.basis.range"),
+                _range_text(ctx, basis.start, basis.end),
+                "normal" if basis.start else "warn",
+                span=2,
+            )
+        )
+        if basis.now is not None:
+            now_text = f"{ctx.dt(basis.now)} · {ctx.label('report.now_origin', basis.now_origin)}"
+            facts.append(Fact(ctx.t("report.basis.now"), now_text, span=2))
+            shift = _safe_delta(basis.now, basis.end)
+            if shift is not None and abs(shift) >= timedelta(minutes=1):  # --now away from the newest event
+                facts.append(Fact(ctx.t("report.basis.newest"), ctx.dt(basis.end), span=2))
+        else:
+            facts.append(Fact(ctx.t("report.basis.now"), ctx.t("report.unknown"), "warn"))
+        age = _safe_delta(report.generated_at, basis.end)  # how old the NEWEST EVENT is, whatever --now says
         if age is not None and age > timedelta(days=1):
             facts.append(
                 Fact(ctx.t("report.basis.age"), ctx.t("report.basis.age_value", duration=ctx.dur(age)), "warn")
             )
-    else:
-        facts.append(Fact(ctx.t("report.basis.now"), ctx.t("report.unknown"), "warn"))
-    events = _count(basis.events)
-    facts.append(Fact(ctx.t("report.basis.events"), ctx.num(events), "fail" if events <= 0 else "normal"))
-    facts.append(count_fact("report.basis.malformed", basis.malformed, "warn"))
-    facts.append(count_fact("report.basis.bad_ts", basis.bad_timestamps, "warn"))
-    facts.append(count_fact("report.basis.future_ts", basis.future_timestamps, "warn"))
-    facts.append(
-        Fact(ctx.t("report.basis.sampled"), ctx.value(bool(basis.sampled)), "warn" if basis.sampled else "normal")
-    )
-    facts.append(
-        Fact(ctx.t("report.basis.truncated"), ctx.value(bool(basis.truncated)), "fail" if basis.truncated else "normal")
-    )
-    failures = [ctx.text(p, 500) for p in _as_list(basis.partial_failures)]
+        events = _count(basis.events)
+        facts.append(Fact(ctx.t("report.basis.events"), ctx.num(events), "fail" if events <= 0 else "normal"))
+        facts.append(count_fact("report.basis.malformed", basis.malformed, "warn"))
+        facts.append(count_fact("report.basis.bad_ts", basis.bad_timestamps, "warn"))
+        facts.append(count_fact("report.basis.future_ts", basis.future_timestamps, "warn"))
+        facts.append(
+            Fact(ctx.t("report.basis.sampled"), ctx.value(bool(basis.sampled)), "warn" if basis.sampled else "normal")
+        )
+        facts.append(
+            Fact(
+                ctx.t("report.basis.truncated"),
+                ctx.value(bool(basis.truncated)),
+                "fail" if basis.truncated else "normal",
+            )
+        )
+        excluded = _count(getattr(basis, "excluded_by_window", 0))
+        if excluded:
+            newest = getattr(basis, "excluded_newest", None)
+            items = [ctx.t("report.basis.excluded_newest", at=ctx.dt(newest))] if newest is not None else []
+            facts.append(Fact(ctx.t("report.basis.excluded"), ctx.num(excluded), "warn", items))
+    failures = [_failure_text(ctx, p) for p in _as_list(basis.partial_failures)]
     facts.append(
         Fact(
             ctx.t("report.basis.partial"),
@@ -1901,6 +2173,17 @@ def _basis_view(ctx: RenderContext, report: Report, statuses: Mapping[str, str])
     facts.append(
         Fact(ctx.t("report.basis.sources"), ctx.num(len(sources)), "normal", sources[:10], max(0, len(sources) - 10))
     )
+    skipped = [ctx.text(s, 300) for s in _as_list(getattr(basis, "skipped_files", []))]
+    if skipped:
+        facts.append(
+            Fact(
+                ctx.t("report.basis.skipped_files"),
+                ctx.num(len(skipped)),
+                "warn",
+                skipped[:10],
+                max(0, len(skipped) - 10),
+            )
+        )
     warnings = [ctx.msg(w, 500) for w in _as_list(basis.warnings)]
     if warnings:
         facts.append(
@@ -1912,9 +2195,7 @@ def _basis_view(ctx: RenderContext, report: Report, statuses: Mapping[str, str])
                 max(0, len(warnings) - 20),
             )
         )
-    not_evaluated = [
-        ctx.label("domain", n) if has(f"domain.{n}") else ctx.text(n, 100) for n in _as_list(basis.not_evaluated)
-    ]
+    not_evaluated = [_not_evaluated_label(ctx, n) for n in _as_list(basis.not_evaluated)]
     facts.append(
         Fact(
             ctx.t("report.basis.not_evaluated"),
@@ -1924,6 +2205,19 @@ def _basis_view(ctx: RenderContext, report: Report, statuses: Mapping[str, str])
         )
     )
     return BasisView(complete=not reasons, reasons=reasons, caveats=caveats, facts=facts)
+
+
+def _not_evaluated_label(ctx: RenderContext, name: Any) -> str:
+    text = str(name)
+    return ctx.t(f"domain.{text}") if has(f"domain.{text}") else ctx.text(text, 100)
+
+
+# not_evaluated markers that are parts of a domain (the domain itself ran): shown on that domain's card
+_NOT_EVALUATED_DOMAIN = {
+    "agent-inventory": "pipeline",
+    "wazuh-api": "pipeline",
+    "wazuh-manager-stats": "pipeline",
+}
 
 
 def iso_utc(value: Any) -> str | None:
@@ -1977,9 +2271,16 @@ def _cards(ctx: RenderContext, report: Report, statuses: Mapping[str, str]) -> l
             detail = ctx.t("report.card.assessment_incomplete")
         else:
             detail = ctx.t("report.card.no_findings")
+        notes = [
+            ctx.t("report.card.not_evaluated", what=_not_evaluated_label(ctx, marker))
+            for marker in _as_list(report.data_basis.not_evaluated)
+            if _NOT_EVALUATED_DOMAIN.get(str(marker)) == domain
+        ]
         cards.append(
-            DomainCard(domain, ctx.t(f"domain.{domain}"), status, ctx.t(f"status.{status}"), dict(per), detail)
+            DomainCard(domain, ctx.t(f"domain.{domain}"), status, ctx.t(f"status.{status}"), dict(per), detail, notes)
         )
+    if is_audit(report):  # an audit reads a ruleset: only the tuning audit (and a failed assessment) apply
+        cards = [c for c in cards if c.domain == "tuning" or (c.domain == "assessment" and c.status != "ok")]
     return cards
 
 
@@ -2024,8 +2325,17 @@ def _key_numbers(ctx: RenderContext, report: Report, statuses: Mapping[str, str]
     if noise_ok:
         tunes = [f for f in report.findings if f.kind == "noise.tune"]
         review = sum(1 for f in tunes if _review_required(f))
-        hint = ctx.t("report.kpi.tune_hint", n=ctx.num(review)) if review else ""
-        numbers.append(KeyNumber(ctx.t("report.kpi.tune"), ctx.num(len(tunes)), hint, "ok" if tunes else "neutral"))
+        safe = _as_int(noise.get("safe_tuning_candidates"))
+        if safe is None:  # older sections: every tune finding, review-required ones included
+            safe = len(tunes)
+        else:
+            review = _as_int(noise.get("review_required_candidates")) or 0
+        hints = [ctx.t("report.kpi.tune_hint", n=ctx.num(review))] if review else []
+        index_only = _as_int(noise.get("index_volume_candidates")) or 0
+        if index_only:
+            hints.append(ctx.t("report.kpi.index_hint", n=ctx.num(index_only)))
+        tone = "ok" if safe else "neutral"
+        numbers.append(KeyNumber(ctx.t("report.kpi.tune"), ctx.num(safe), " · ".join(hints), tone))
     else:
         numbers.append(KeyNumber(ctx.t("report.kpi.tune"), dash, na, "na"))
 
@@ -2070,6 +2380,13 @@ def _key_numbers(ctx: RenderContext, report: Report, statuses: Mapping[str, str]
         numbers.append(KeyNumber(ctx.t("report.kpi.risky"), ctx.num(value), "", "warn" if value else "ok"))
     else:
         numbers.append(KeyNumber(ctx.t("report.kpi.risky"), dash, na, "na"))
+    if is_audit(report):  # a ruleset audit: rules instead of events, and only the tuning numbers apply
+        rules = _as_int(tuning.get("rules_parsed"))
+        count = rules if rules is not None else _count(report.data_basis.events)
+        numbers = [
+            KeyNumber(ctx.t("report.kpi.rules"), ctx.num(count), tone="fail" if count <= 0 else "neutral"),
+            numbers[-1],
+        ]
     if not basis_complete(report.data_basis):  # a count of zero on partial data is not a green light
         for number in numbers:
             if number.tone == "ok":
@@ -2131,12 +2448,14 @@ def _noise_view(ctx: RenderContext, report: Report, status: str) -> NoiseView:
     for raw in raw_rules[:100]:
         rule = _as_map(raw)
         verdict, verdict_label = _verdict(ctx, rule.get("verdict"))
+        if verdict == "tune" and rule.get("verdict_scoped"):  # the verdict covers one scope, not the whole rule
+            verdict_label = ctx.t("report.verdict.tune_scoped")
         days_active = _as_int(rule.get("days_active"))
         days = _as_int(rule.get("days"))
         share = _as_float(rule.get("share"))
         rules.append(
             RuleRow(
-                rule_id=ctx.text(rule.get("rule_id", "?"), 60),
+                rule_id=_short_rule_id(ctx.text(rule.get("rule_id", "?"), 60)),
                 description=ctx.text(rule.get("description") or "", 160),
                 level=ctx.num(rule.get("level")),
                 total=ctx.num(rule.get("total")),
@@ -2156,6 +2475,7 @@ def _noise_view(ctx: RenderContext, report: Report, status: str) -> NoiseView:
         )
     tune: list[TuneRow] = []
     investigate: list[InvestigateRow] = []
+    index_volume: list[InvestigateRow] = []
     for finding in order_findings(report.findings):
         if finding.kind == "noise.tune":
             ev = _as_map(finding.evidence)
@@ -2178,10 +2498,14 @@ def _noise_view(ctx: RenderContext, report: Report, status: str) -> NoiseView:
                     dependents=ctx.value(dependents, 200) if dependents else "",
                 )
             )
-        elif finding.kind in _NOISE_OTHER_KINDS:
-            verdict, verdict_label = _verdict(ctx, finding.kind.split(".", 1)[1])
+        elif finding.kind in _NOISE_OTHER_KINDS or finding.kind == "noise.index_volume":
+            index_only = finding.kind == "noise.index_volume"
+            if index_only:
+                verdict, verdict_label = "watch", ctx.t("report.noise.index_volume_badge")
+            else:
+                verdict, verdict_label = _verdict(ctx, finding.kind.split(".", 1)[1])
             severity = _severity_value(finding.severity)
-            investigate.append(
+            (index_volume if index_only else investigate).append(
                 InvestigateRow(
                     anchor=_anchor(str(finding.fingerprint)),
                     title=ctx.msg(finding.title, 300),
@@ -2189,13 +2513,17 @@ def _noise_view(ctx: RenderContext, report: Report, status: str) -> NoiseView:
                     verdict_label=verdict_label,
                     severity=severity,
                     severity_label=ctx.t(f"severity.{severity}"),
-                    reasons=[ctx.msg(r, 500) for r in reasons_of(finding)[:8]],
+                    reasons=[ctx.msg(r, 1000) for r in reasons_of(finding)[:8]],
                 )
             )
     time_saved = ""
     saved = _as_list(section.get("time_saved_minutes_per_day"))
-    if len(saved) >= 2 and _as_float(saved[0]) is not None and _as_float(saved[1]) is not None:
-        time_saved = ctx.t("report.noise.time_saved_value", low=ctx.num(saved[0]), high=ctx.num(saved[1]))
+    low, high = (_as_float(saved[0]), _as_float(saved[1])) if len(saved) >= 2 else (None, None)
+    if low is not None and high is not None:
+        if high <= 0:  # "0–0 min/day" reads like a bug: say it plainly
+            time_saved = ctx.t("report.noise.time_saved_none")
+        else:
+            time_saved = ctx.t("report.noise.time_saved_value", low=ctx.num(low), high=ctx.num(high))
     suppressions = section.get("suppressions_file")
     consumed = ("status", "totals", "rules", "time_saved_minutes_per_day", "time_saved_kind", "suppressions_file")
     return NoiseView(
@@ -2207,10 +2535,19 @@ def _noise_view(ctx: RenderContext, report: Report, status: str) -> NoiseView:
         rules_more=max(0, len(raw_rules) - 100),
         tune=tune,
         investigate=investigate,
+        index_volume=index_volume,
         time_saved=time_saved,
         suppressions_file=ctx.text(suppressions, 500) if suppressions else "",
         extra=_generic_facts(ctx, section, consumed),
     )
+
+
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _short_rule_id(rule_id: str) -> str:
+    """ECS/Elastic rule ids are UUIDs: the table shows their first block (the rule name is in the next column)."""
+    return f"{rule_id[:8]}…" if _UUID.match(rule_id) else rule_id
 
 
 def _key_text(ctx: RenderContext, key: Any) -> str:
@@ -2342,12 +2679,13 @@ def _coverage_view(
         rows.append(
             MatrixRow(
                 agent=ctx.value(row.get("agent"), 120),
-                platform=ctx.text(row.get("platform") or "", 40),
+                platform=_enum_text(ctx, "platform", str(row.get("platform") or ""))
+                or ctx.text(row.get("platform") or "", 40),
                 cells=cells,
                 tier_label=ctx.label("report.tier", tier) if isinstance(tier, str) and tier else "",
             )
         )
-    platforms = _generic_facts(ctx, _as_map(section.get("platforms")), ())
+    platforms = _generic_facts(ctx, _as_map(section.get("platforms")), (), "platforms")
     consumed = ("status", "matrix", "matrix_total", "matrix_truncated", "expected_sources", "platforms")
     total_rows = max(len(raw_rows), _as_int(section.get("matrix_total")) or 0)
     records = [item for item in expected_raw if isinstance(item, Mapping)]
@@ -2360,12 +2698,43 @@ def _coverage_view(
         rows_more=max(0, total_rows - len(rows)),
         platforms=platforms,
         expected=[ctx.value(e, 200) for e in expected_raw[:40] if not isinstance(e, Mapping)],
-        expected_table=_record_table(ctx, records),
+        expected_table=_expected_table(ctx, records),
         extra=_generic_facts(ctx, section, consumed),
     )
 
 
-def _check_row(ctx: RenderContext, item: Any) -> CheckRow:
+# pipeline check fields that only repeat what the data-basis banner already says, or are empty lists
+_CHECK_SKIP = frozenset({"not_evaluated"})
+
+
+def _check_detail(ctx: RenderContext, mapping: Mapping[str, Any], skip: Iterable[str], basis: DataBasis | None) -> str:
+    check = str(mapping.get("check") or "")
+    if check == "freshness" and basis is not None:
+        # the newest EVENT (basis.end) and the reference "now" (basis.now, maybe set with --now) are shown apart
+        parts = [f"{ctx.t('report.basis.newest')}: {ctx.dt(basis.end) if basis.end else ctx.t('report.unknown')}"]
+        if basis.now is not None:
+            origin = ctx.label("report.now_origin", basis.now_origin)
+            parts.append(f"{ctx.t('report.basis.now')}: {ctx.dt(basis.now)} ({origin})")
+        age = _as_float(mapping.get("age_hours"))
+        if age is not None:
+            parts.append(f"{ctx.evidence_label('age_hours')}: {ctx.num(age)}")
+        return " · ".join(parts)
+    rest: list[str] = []
+    for key, value in mapping.items():
+        name = str(key)
+        if name in skip or name in _CHECK_SKIP or value in (None, "", [], {}):
+            continue
+        if isinstance(value, (list, tuple)) and value and all(isinstance(v, Mapping) for v in value):
+            shown = _list_items(ctx, name, list(value)[:3])
+            if len(value) > 3:
+                shown.append(ctx.t("report.more_items", n=ctx.num(len(value) - 3)))
+            rest.append(f"{ctx.evidence_label(name)}: {'; '.join(shown)}")
+        else:
+            rest.append(f"{ctx.evidence_label(name)}: {_evidence_value(ctx, name, value)}")
+    return " · ".join(rest[:12])
+
+
+def _check_row(ctx: RenderContext, item: Any, basis: DataBasis | None = None) -> CheckRow:
     mapping = _as_map(item)
     if not mapping:
         return CheckRow(ctx.value(item, 300), None, "", "")
@@ -2373,11 +2742,7 @@ def _check_row(ctx: RenderContext, item: Any) -> CheckRow:
     status: str | None = _norm_status(mapping.get("status"))
     if status is None and isinstance(mapping.get("ok"), bool):
         status = "ok" if mapping["ok"] else "fail"
-    rest = [
-        f"{ctx.evidence_label(str(k))}: {_evidence_value(ctx, str(k), v)}"
-        for k, v in mapping.items()
-        if k not in (name_key, "status", "ok") and v not in (None, "", [], {})
-    ]
+    detail = _check_detail(ctx, mapping, (name_key or "", "status", "ok"), basis)
     return CheckRow(
         name=(
             ctx.label("report.check", mapping.get(name_key))
@@ -2388,7 +2753,7 @@ def _check_row(ctx: RenderContext, item: Any) -> CheckRow:
         ),
         status=status,
         status_label=ctx.t(f"status.{status}") if status else ctx.value(mapping.get("status"), 40),
-        detail=_cut("; ".join(rest[:10]), 600),
+        detail=_cut(detail, 700),
     )
 
 
@@ -2398,7 +2763,7 @@ def _pipeline_view(ctx: RenderContext, report: Report, status: str) -> PipelineV
     agents = [
         Fact(ctx.label("report.agent", str(k)), ctx.value(v, 200)) for k, v in _as_map(section.get("agents")).items()
     ]
-    checks = [_check_row(ctx, item) for item in _as_list(section.get("checks"))[:100]]
+    checks = [_check_row(ctx, item, report.data_basis) for item in _as_list(section.get("checks"))[:100]]
     return PipelineView(
         assessed=assessed,
         status=status,
@@ -2477,7 +2842,8 @@ def build_view(ctx: RenderContext, report: Report, *, finding_limit: int | None 
         if name not in DOMAINS
     ]
     basis_obj = report.data_basis
-    period = _range_text(ctx, basis_obj.start, basis_obj.end)
+    audit = is_audit(report)
+    period = "" if audit else _range_text(ctx, basis_obj.start, basis_obj.end)
     footer = [
         ctx.t("report.footer.readonly"),
         ctx.t("report.footer.redacted" if ctx.redacted else "report.footer.not_redacted"),
@@ -2512,6 +2878,7 @@ def build_view(ctx: RenderContext, report: Report, *, finding_limit: int | None 
         total_findings=len(findings),
         severity_counts=severity_counts,
         footer=footer,
+        audit=audit,
     )
 
 

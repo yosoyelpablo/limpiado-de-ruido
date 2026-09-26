@@ -75,8 +75,10 @@ register(
             "es": "Las reglas de supresión solo se generan para alertas de Wazuh 4.x (perfil de entrada: {profile}).",
         },
         "engine.emit_skipped.title": {
-            "en": "{count} tuning suggestion(s) were not written as Wazuh rules (see reasons)",
-            "es": "{count} sugerencia(s) de ajuste no se escribieron como reglas de Wazuh (vea los motivos)",
+            "en": "{count} tuning {count:plural:suggestion was|suggestions were} not written as Wazuh rules "
+            "(see the reasons)",
+            "es": "{count} {count:plural:sugerencia|sugerencias} de ajuste no se "
+            "{count:plural:escribió|escribieron} como reglas de Wazuh (vea los motivos)",
         },
         "engine.emit_notes.title": {
             "en": "Notes about the generated suppression file ({count})",
@@ -164,17 +166,22 @@ register(
         },
         # --since / --now window
         "engine.window.since": {
-            "en": "{count} event(s) older than the --since cutoff ({cutoff}) were read but not analyzed.",
-            "es": "{count} evento(s) anteriores al corte de --since ({cutoff}) se leyeron pero no se analizaron.",
+            "en": "{count} {count:plural:event|events} older than the --since cutoff ({cutoff}) "
+            "{count:plural:was|were} read but not analyzed.",
+            "es": "{count} {count:plural:evento anterior|eventos anteriores} al corte de --since ({cutoff}) "
+            "se {count:plural:leyó|leyeron} pero no se {count:plural:analizó|analizaron}.",
         },
         "engine.window.until": {
-            "en": "{count} event(s) later than --now ({until}) were read but not analyzed.",
-            "es": "{count} evento(s) posteriores a --now ({until}) se leyeron pero no se analizaron.",
+            "en": "{count} {count:plural:event|events} later than --now ({until}) {count:plural:was|were} "
+            "read but not analyzed.",
+            "es": "{count} {count:plural:evento posterior|eventos posteriores} a --now ({until}) se "
+            "{count:plural:leyó|leyeron} pero no se {count:plural:analizó|analizaron}.",
         },
         "engine.window.both": {
-            "en": "{count} event(s) outside the analysis window ({cutoff} to {until}) were read but not analyzed.",
-            "es": "{count} evento(s) fuera de la ventana de análisis ({cutoff} a {until}) se leyeron pero no se "
-            "analizaron.",
+            "en": "{count} {count:plural:event|events} outside the analysis window ({cutoff} to {until}) "
+            "{count:plural:was|were} read but not analyzed.",
+            "es": "{count} {count:plural:evento|eventos} fuera de la ventana de análisis ({cutoff} a {until}) "
+            "se {count:plural:leyó|leyeron} pero no se {count:plural:analizó|analizaron}.",
         },
         "engine.window.newest": {
             "en": "The newest of them is from {newest}.",

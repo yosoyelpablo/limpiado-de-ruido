@@ -13,10 +13,10 @@ from hushwatch.config import ApiConfig, ConfigError, InputConfig, NotifyConfig, 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = {
     "ACME_WAZUH_API_USER": "api-reader",
-    "ACME_WAZUH_API_PASSWORD": "S3cret-api-pass",
+    "ACME_WAZUH_API_PASSWORD": "FAKE-test-api-pass",
     "ACME_WEBHOOK_URL": "https://hooks.example/abc",
     "GLOBEX_INDEXER_USER": "idx-reader",
-    "GLOBEX_INDEXER_PASSWORD": "S3cret-idx-pass",
+    "GLOBEX_INDEXER_PASSWORD": "FAKE-test-idx-pass",
     "GLOBEX_SLACK_WEBHOOK": "https://hooks.slack.example/services/T0/B0/XYZ",
 }
 
@@ -54,7 +54,7 @@ def test_secrets_never_in_repr() -> None:
     cfg = load_config(ROOT / "examples" / "hushwatch.yml", environ=ENV)
     for tenant in cfg.tenants.values():
         text = repr(tenant)
-        for secret in ("S3cret-api-pass", "S3cret-idx-pass", "hooks.slack.example/services", "hooks.example/abc"):
+        for secret in ("FAKE-test-api-pass", "FAKE-test-idx-pass", "hooks.slack.example/services", "hooks.example/abc"):
             assert secret not in text
 
 
@@ -64,7 +64,7 @@ def test_missing_env_var_names_the_variable_not_a_value() -> None:
     )
     with pytest.raises(ConfigError, match="ACME_WAZUH_API_PASSWORD") as caught:
         cfg.tenant("acme")
-    assert "S3cret" not in str(caught.value)
+    assert "FAKE-test" not in str(caught.value)
     assert cfg.tenant("globex").inputs[0].password == ENV["GLOBEX_INDEXER_PASSWORD"]  # other tenants still work
 
 

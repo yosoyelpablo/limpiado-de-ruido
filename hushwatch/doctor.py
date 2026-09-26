@@ -25,7 +25,7 @@ from .timeutil import UTC, humanize
 register(
     {
         "doctor.title": {"en": "hushwatch doctor", "es": "hushwatch doctor"},
-        "doctor.col.tenant": {"en": "tenant", "es": "tenant"},
+        "doctor.col.tenant": {"en": "tenant", "es": "cliente"},
         "doctor.col.check": {"en": "check", "es": "control"},
         "doctor.col.status": {"en": "status", "es": "estado"},
         "doctor.col.detail": {"en": "detail", "es": "detalle"},
@@ -34,8 +34,9 @@ register(
         "doctor.status.warn": {"en": "WARN", "es": "AVISO"},
         "doctor.status.fail": {"en": "FAIL", "es": "FALLA"},
         "doctor.summary": {
-            "en": "{checks} check(s): {failed} failed, {warned} warning(s)",
-            "es": "{checks} control(es): {failed} con falla, {warned} con aviso",
+            "en": "{checks} {checks:plural:check|checks}: {failed} failed, {warned} with {warned:plural:a "
+            "warning|warnings}",
+            "es": "{checks} {checks:plural:control|controles}: {failed} con falla, {warned} con aviso",
         },
         # check names
         "doctor.check.config": {"en": "config", "es": "configuración"},
@@ -66,7 +67,10 @@ register(
             "en": "{path} is accessible by group/others (mode {mode})",
             "es": "{path} es accesible para el grupo u otros usuarios (modo {mode})",
         },
-        "doctor.config.ok": {"en": "{path} ({count} tenant(s))", "es": "{path} ({count} tenant(s))"},
+        "doctor.config.ok": {
+            "en": "{path} ({count} {count:plural:tenant|tenants})",
+            "es": "{path} ({count} {count:plural:cliente|clientes})",
+        },
         "doctor.config.literal": {
             "en": "literal credentials in the config: {places}",
             "es": "credenciales literales en la configuración: {places}",
@@ -103,8 +107,8 @@ register(
         "doctor.file.empty_fix": {"en": "point to alerts.json", "es": "indique alerts.json"},
         "doctor.file.ok": {"en": "{path}: profile {profile}, {kind}", "es": "{path}: perfil {profile}, {kind}"},
         "doctor.file.alerts_hint": {
-            "en": "for full log-source silence detection also enable logall_json and analyze archives.json",
-            "es": "para detectar el silencio real de las fuentes habilite también logall_json y analice archives.json",
+            "en": "for full log-source silence detection, also enable logall_json and analyze archives.json",
+            "es": "para detectar el silencio real de las fuentes, habilite también logall_json y analice archives.json",
         },
         "doctor.tls.fix": {
             "en": "set ca_cert to your indexer root CA (Wazuh: /etc/wazuh-indexer/certs/root-ca.pem); do not "
@@ -164,12 +168,12 @@ register(
             "es": "revise la URL (puerto 55000), las credenciales y el RBAC (agents:read, rules:read, manager:read)",
         },
         "doctor.api.ok": {
-            "en": "API {version}; {count} agents ({summary})",
-            "es": "API {version}; {count} agentes ({summary})",
+            "en": "API {version}; {count} {count:plural:agent|agents} ({summary})",
+            "es": "API {version}; {count} {count:plural:agente|agentes} ({summary})",
         },
         "doctor.api.stale": {
-            "en": "{count} agent(s) without keepalive for more than {age}",
-            "es": "{count} agente(s) sin keepalive desde hace más de {age}",
+            "en": "{count} {count:plural:agent|agents} without keepalive for more than {age}",
+            "es": "{count} {count:plural:agente|agentes} sin keepalive desde hace más de {age}",
         },
         "doctor.api.stale_fix": {
             "en": "run 'hushwatch report' to see which and since when",
@@ -190,8 +194,9 @@ register(
             "es": "corrija ruleset_dirs (las rutas relativas son relativas al archivo de configuración)",
         },
         "doctor.ruleset.ok": {
-            "en": "{path}: {rules} rules, {problems} parse problem(s)",
-            "es": "{path}: {rules} reglas, {problems} problema(s) de lectura",
+            "en": "{path}: {rules} {rules:plural:rule|rules}, {problems} parse {problems:plural:problem|problems}",
+            "es": "{path}: {rules} {rules:plural:regla|reglas}, {problems} "
+            "{problems:plural:problema|problemas} de lectura",
         },
         "doctor.ruleset.problems_fix": {
             "en": "see 'hushwatch audit' for details",
@@ -203,7 +208,10 @@ register(
             "es": "corrija la ruta (las rutas relativas son relativas al archivo de configuración)",
         },
         "doctor.path.ok": {"en": "{path}", "es": "{path}"},
-        "doctor.agents.ok": {"en": "{path}: {count} agents", "es": "{path}: {count} agentes"},
+        "doctor.agents.ok": {
+            "en": "{path}: {count} {count:plural:agent|agents}",
+            "es": "{path}: {count} {count:plural:agente|agentes}",
+        },
         "doctor.agents.bad": {"en": "{error}", "es": "{error}"},
         "doctor.agents.bad_fix": {
             "en": "export the Wazuh API GET /agents response as JSON (data.affected_items)",
@@ -253,8 +261,8 @@ def run_doctor(cfg: Config, tenants: list[str], *, console: Console, lang: str =
     table.add_column(render(M("doctor.col.tenant"), lang), no_wrap=True)
     table.add_column(render(M("doctor.col.check"), lang), no_wrap=True)
     table.add_column(render(M("doctor.col.status"), lang), no_wrap=True)
-    table.add_column(render(M("doctor.col.detail"), lang), overflow="fold", ratio=3)
-    table.add_column(render(M("doctor.col.fix"), lang), overflow="fold", ratio=2)  # the fix is never cut short
+    table.add_column(render(M("doctor.col.detail"), lang), overflow="fold", ratio=1)
+    table.add_column(render(M("doctor.col.fix"), lang), overflow="fold", ratio=1)  # never cut short
     colors = {"ok": "green", "warn": "yellow", "fail": "red"}
     for c in checks:
         table.add_row(

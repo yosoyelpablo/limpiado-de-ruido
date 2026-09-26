@@ -54,8 +54,9 @@ register(
             "es": "Mismo incidente, informado una sola vez aquí: {title} ({domain}).",
         },
         "correlate.reason.explains_more": {
-            "en": "Also covers {count} more related finding(s), listed in the evidence.",
-            "es": "También cubre {count} hallazgo(s) relacionado(s) más, listados en la evidencia.",
+            "en": "Also covers {count} more related {count:plural:finding|findings}, listed in the evidence.",
+            "es": "También cubre {count} {count:plural:hallazgo relacionado|hallazgos relacionados} más, "
+            "{count:plural:listado|listados} en la evidencia.",
         },
     }
 )

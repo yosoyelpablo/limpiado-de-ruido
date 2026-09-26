@@ -333,6 +333,7 @@ padding:14px 16px 14px 19px;box-shadow:var(--shadow);overflow:hidden;min-width:0
 .card .s{display:flex;align-items:center;gap:8px;margin:9px 0 6px;font-size:16.5px;font-weight:720;line-height:1.25}
 .card.st-not_assessed .s{color:var(--na-ink)}
 .card .c{font-size:12.5px;color:var(--ink-2)}
+.card .c.note{margin-top:6px;color:var(--warn-ink,var(--ink-2));display:flex;gap:6px;align-items:flex-start}
 .dot{width:22px;height:22px;border-radius:50%;display:inline-grid;place-items:center;background:var(--st);color:#fff;
 flex:none}
 .dot .ic{width:13px;height:13px;stroke-width:2.4}
@@ -442,8 +443,8 @@ padding:14px 18px;margin:0 0 10px;box-shadow:var(--shadow);scroll-margin-top:60p
 .fb{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:10px 28px;margin-top:12px}
 .fb h5{margin:0 0 5px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
 .fb ul{margin:0;padding-left:18px}.fb li{margin:2px 0;overflow-wrap:anywhere}
-.kv{display:grid;grid-template-columns:minmax(96px,max-content) minmax(0,1fr);gap:4px 14px;margin:0;font-size:13px}
-.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.kv{display:grid;grid-template-columns:fit-content(55%) minmax(0,1fr);gap:4px 14px;margin:0;font-size:13px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:break-word;font-variant-numeric:tabular-nums}
 .kv dd.sp{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px}
 .reco{grid-column:1/-1;display:flex;gap:10px;background:var(--surface-2);border:1px solid var(--line);
 border-radius:8px;
@@ -626,18 +627,10 @@ class _Page(_Kit):
 
     def render(self) -> tuple[Safe, str]:
         v = self.v
-        sections = [
-            self._basis(),
-            self._status(),
-            self._numbers(),
-            self._noise(),
-            self._silence(),
-            self._coverage(),
-            self._pipeline(),
-            self._tuning(),
-            self._others(),
-            self._findings(),
-        ]
+        sections: list[Safe | None] = [self._basis(), self._status(), self._numbers()]
+        if not v.audit:  # a ruleset audit has no events: only the tuning audit applies
+            sections += [self._noise(), self._silence(), self._coverage(), self._pipeline()]
+        sections += [self._tuning(), self._others(), self._findings()]
         body = _join(
             [
                 h("a", {"class": "skip", "href": "#main"}, self.t("report.skip")),
@@ -654,11 +647,10 @@ class _Page(_Kit):
     def _masthead(self) -> Safe:
         v = self.v
         redaction = self.t("report.redaction.on" if v.redacted else "report.redaction.off")
-        meta = [
-            (self.t("report.tenant"), v.tenant),
-            (self.t("report.period"), v.period),
-            (self.t("report.generated"), v.generated_at),
-        ]
+        meta = [(self.t("report.tenant"), v.tenant)]
+        if v.period:
+            meta.append((self.t("report.period"), v.period))
+        meta.append((self.t("report.generated"), v.generated_at))
         items = [h("div", None, h("dt", None, label), h("dd", None, value)) for label, value in meta]
         items.append(
             h(
@@ -769,6 +761,7 @@ class _Page(_Kit):
             h("div", {"class": "d"}, card.label),
             h("div", {"class": "s"}, h("span", {"class": "dot"}, _icon(card.status)), card.status_label),
             h("div", {"class": "c"}, card.detail),
+            [h("div", {"class": "c note"}, _icon("info"), note) for note in card.notes],
         )
 
     def _status(self) -> Safe:
@@ -860,6 +853,24 @@ class _Page(_Kit):
             body.append(h("ul", {"class": "inv"}, items))
         else:
             body.append(self.empty("report.noise.none_investigate"))
+        if n.index_volume:
+            body.append(h("h3", None, self.t("report.noise.index_volume")))
+            body.append(h("p", {"class": "hint"}, self.t("report.noise.index_volume_hint")))
+            items = [
+                h(
+                    "li",
+                    None,
+                    h(
+                        "div",
+                        {"class": "t"},
+                        h("span", {"class": _cls("b", "v-watch")}, i.verdict_label),
+                        h("a", {"href": f"#{i.anchor}"}, i.title),
+                    ),
+                    h("ul", None, [h("li", None, r) for r in i.reasons[:3]]) if i.reasons else None,
+                )
+                for i in n.index_volume
+            ]
+            body.append(h("ul", {"class": "inv"}, items))
         if n.time_saved:
             body.append(
                 h(
@@ -1206,6 +1217,15 @@ class _Page(_Kit):
             columns.append(
                 h("div", None, h("h5", None, self.t("report.finding.evidence")), h("dl", {"class": "kv"}, rows))
             )
+        if f.explained:
+            columns.append(
+                h(
+                    "div",
+                    None,
+                    h("h5", None, self.t("report.finding.explained")),
+                    h("ul", None, [h("li", None, item) for item in f.explained]),
+                )
+            )
         if f.recommendation:
             columns.append(
                 h(
@@ -1220,8 +1240,6 @@ class _Page(_Kit):
             h("span", None, self.t("report.finding.fingerprint") + ": ", h("code", None, f.fingerprint)),
             h("span", None, self.t("report.finding.subject") + ": ", h("code", None, f.subject)),
         ]
-        if f.related:
-            meta.append(h("span", None, self.t("report.finding.related") + ": ", h("code", None, ", ".join(f.related))))
         return h(
             "article",
             {"class": _cls("finding", f"sev-{f.severity}"), "id": f.anchor},

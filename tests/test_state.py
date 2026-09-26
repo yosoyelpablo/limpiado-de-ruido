@@ -835,7 +835,15 @@ def test_corrupt_database_is_a_state_error(tmp_path: Path) -> None:
         StateStore(db)
 
 
-RAW_VALUES = ("srv-web-01", "198.51.100.23", "alice", "hunter2pass", "tok3nSECRET", "198.51.100.7", "corp.example")
+RAW_VALUES = (
+    "srv-web-01",
+    "198.51.100.23",
+    "alice",
+    "FAKE-test-password-1",
+    "FAKE-test-token",
+    "198.51.100.7",
+    "corp.example",
+)
 
 
 def _state_bytes(directory: Path) -> bytes:
@@ -871,7 +879,7 @@ def test_state_holds_no_raw_subjects_or_entities(tmp_path: Path) -> None:
         TENANT,
         T0,
         False,
-        "indexer https://svc_backup:hunter2pass@198.51.100.7:9200/_search?token=tok3nSECRET "
+        "indexer https://svc_backup:FAKE-test-password-1@198.51.100.7:9200/_search?token=FAKE-test-token "
         "failed for alice@corp.example",
     )
     hb = s.last_heartbeat(TENANT)
@@ -909,7 +917,9 @@ def test_fallback_template_is_scrubbed_before_storage(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "password", ["hunter2pass", "Pa@ss!w0rd", "p@ss@word!", "x!y@z#w"], ids=["plain", "at", "two_at", "hash"]
+    "password",
+    ["FAKE-test-password-1", "FAKE@test!pass", "FAKE@two@test!", "x!y@z#w"],
+    ids=["plain", "at", "two_at", "hash"],
 )
 def test_heartbeat_detail_drops_url_credentials(store: StateStore, password: str) -> None:
     # regression: a password containing '@' was split and its first part stored in clear

@@ -147,22 +147,27 @@ register(
         },
         "cli.fleet.none": {"en": "no tenant could be analyzed", "es": "no se pudo analizar ningún tenant"},
         "cli.check.summary": {
-            "en": "{tenant}: {findings} finding(s), {opened} opened, {resolved} resolved, {delivered} of {total} "
-            "notification(s) delivered",
-            "es": "{tenant}: {findings} hallazgo(s), {opened} abierto(s), {resolved} resuelto(s), {delivered} de "
-            "{total} notificación(es) entregada(s)",
+            "en": "{tenant}: {findings} {findings:plural:finding|findings}, {opened} opened, {resolved} "
+            "resolved, {delivered} of {total} {total:plural:notification|notifications} delivered",
+            "es": "{tenant}: {findings} {findings:plural:hallazgo|hallazgos}, {opened} "
+            "{opened:plural:abierto|abiertos}, {resolved} {resolved:plural:resuelto|resueltos}, "
+            "{delivered} de {total} {total:plural:notificación entregada|notificaciones entregadas}",
         },
         "cli.check.summary_dry": {
-            "en": "{tenant}: {findings} finding(s), {opened} opened, {resolved} resolved, {total} notification(s) "
-            "not sent (dry run: the next run sends them)",
-            "es": "{tenant}: {findings} hallazgo(s), {opened} abierto(s), {resolved} resuelto(s), {total} "
-            "notificación(es) sin enviar (simulación: las envía la próxima ejecución)",
+            "en": "{tenant}: {findings} {findings:plural:finding|findings}, {opened} opened, {resolved} "
+            "resolved, {total} {total:plural:notification|notifications} not sent (dry run: the next "
+            "run sends them)",
+            "es": "{tenant}: {findings} {findings:plural:hallazgo|hallazgos}, {opened} "
+            "{opened:plural:abierto|abiertos}, {resolved} {resolved:plural:resuelto|resueltos}, {total} "
+            "{total:plural:notificación|notificaciones} sin enviar (simulación: las envía la próxima "
+            "ejecución)",
         },
         "cli.check.summary_none": {
-            "en": "{tenant}: {findings} finding(s), {opened} opened, {resolved} resolved, {total} change(s), no "
-            "notification target configured",
-            "es": "{tenant}: {findings} hallazgo(s), {opened} abierto(s), {resolved} resuelto(s), {total} "
-            "cambio(s), sin destino de notificación configurado",
+            "en": "{tenant}: {findings} {findings:plural:finding|findings}, {opened} opened, {resolved} "
+            "resolved, {total} {total:plural:change|changes}, no notification target configured",
+            "es": "{tenant}: {findings} {findings:plural:hallazgo|hallazgos}, {opened} "
+            "{opened:plural:abierto|abiertos}, {resolved} {resolved:plural:resuelto|resueltos}, {total} "
+            "{total:plural:cambio|cambios}, sin destino de notificación configurado",
         },
         "cli.check.notify_failed": {
             "en": "{tenant}: notification not delivered: {error}",

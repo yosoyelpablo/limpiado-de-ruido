@@ -255,13 +255,16 @@ register(
             "(comentarios, & o < sueltos)",
         },
         "wazuh.note.partial": {
-            "en": "{file}: parsed block by block; {failed} block(s) could not be read",
-            "es": "{file}: analizado bloque a bloque; no se pudieron leer {failed} bloque(s)",
+            "en": "{file}: parsed block by block; {failed} {failed:plural:block|blocks} could not be read",
+            "es": "{file}: analizado bloque a bloque; no se {failed:plural:pudo|pudieron} leer {failed} "
+            "{failed:plural:bloque|bloques}",
         },
         "wazuh.note.salvaged": {
-            "en": "{file}: {count} rule id(s) recovered by text scan from unreadable parts (reserved, not analyzed)",
-            "es": "{file}: {count} id(s) de regla recuperados por búsqueda de texto en partes ilegibles "
-            "(reservados, no analizados)",
+            "en": "{file}: {count} rule {count:plural:id|ids} recovered by text scan from unreadable parts "
+            "(reserved, not analyzed)",
+            "es": "{file}: {count} {count:plural:id de regla recuperado|ids de regla recuperados} por "
+            "búsqueda de texto en partes ilegibles ({count:plural:reservado, no analizado|reservados, "
+            "no analizados})",
         },
         "wazuh.note.encoding": {
             "en": "{file} is not valid UTF-8; undecodable bytes were replaced",
@@ -270,8 +273,8 @@ register(
         "wazuh.note.overwrite_missing": {
             "en": '{file} line {line}: rule {rule} has overwrite="yes" but no earlier rule has that id (Wazuh '
             "adds it as a new rule)",
-            "es": '{file}, línea {line}: la regla {rule} tiene overwrite="yes" pero ninguna regla anterior tiene '
-            "ese id (Wazuh la añade como regla nueva)",
+            "es": '{file}, línea {line}: la regla {rule} tiene overwrite="yes" pero ninguna regla anterior '
+            "tiene ese id (Wazuh la agrega como regla nueva)",
         },
         "wazuh.note.nested_group": {
             "en": "{file} line {line}: nested <group> elements (not standard Wazuh syntax)",

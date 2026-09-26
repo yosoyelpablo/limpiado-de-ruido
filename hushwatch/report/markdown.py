@@ -137,17 +137,19 @@ class _MarkdownWriter:
         meta = [
             f"**{self.t('report.tenant')}:** {md_escape(v.tenant)}",
             f"**{self.t('report.generated')}:** {md_escape(v.generated_at)}",
-            f"**{self.t('report.period')}:** {md_escape(v.period)}",
-            f"**{self.t('report.redaction')}:** {self.t(redaction)}",
         ]
+        if v.period:
+            meta.append(f"**{self.t('report.period')}:** {md_escape(v.period)}")
+        meta.append(f"**{self.t('report.redaction')}:** {self.t(redaction)}")
         self.add(" · ".join(meta), "", f"_{md_escape(v.tagline)}_", "")
         self._basis()
         self._status()
         self._numbers()
-        self._noise()
-        self._silence()
-        self._coverage()
-        self._pipeline()
+        if not v.audit:  # a ruleset audit has no events: only the tuning audit applies
+            self._noise()
+            self._silence()
+            self._coverage()
+            self._pipeline()
         self._tuning()
         self._others()
         self._findings()
@@ -172,7 +174,11 @@ class _MarkdownWriter:
         self.heading("report.section.status")
         headers = [self.ctx.t(k) for k in ("report.col.domain", "report.col.status", "report.col.findings")]
         rows = [
-            [md_escape(c.label), f"{_STATUS_ICON.get(c.status, '')} {md_escape(c.status_label)}", md_escape(c.detail)]
+            [
+                md_escape(c.label),
+                f"{_STATUS_ICON.get(c.status, '')} {md_escape(c.status_label)}",
+                " · ".join(md_escape(part) for part in (c.detail, *c.notes)),
+            ]
             for c in self.v.cards
         ]
         self.add(*_table(headers, rows), "")
@@ -276,6 +282,13 @@ class _MarkdownWriter:
             self.add("")
         else:
             self.note("report.noise.none_investigate")
+        if n.index_volume:
+            self.sub("report.noise.index_volume")
+            self.note("report.noise.index_volume_hint")
+            for item in n.index_volume:
+                self.add(f"- {_SEVERITY_ICON.get(item.severity, '')} {md_escape(item.title)}")
+                self.add(*(f"  - {md_escape(r)}" for r in item.reasons[:3]))
+            self.add("")
         if n.time_saved:
             self.add(f"**{self.t('report.noise.time_saved')}:** {md_escape(n.time_saved)}  ")
             self.note("report.noise.time_saved_hint")
@@ -474,8 +487,9 @@ class _MarkdownWriter:
                 self.add(f"  - {md_escape(row.label)}: {md_escape(row.value)}{spark}")
         if f.recommendation:
             self.add(f"- **{self.t('report.finding.recommendation')}:** {md_escape(f.recommendation)}")
-        if f.related:
-            self.add(f"- **{self.t('report.finding.related')}:** " + ", ".join(_code(r) for r in f.related))
+        if f.explained:
+            self.add(f"- **{self.t('report.finding.explained')}:**")
+            self.add(*(f"  - {md_escape(item)}" for item in f.explained))
         self.add("")
 
 

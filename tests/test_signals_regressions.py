@@ -1,4 +1,4 @@
-"""Regression tests for the system-review fixes in silence, coverage, field health and pipeline (F3).
+"""Regression tests for silence, coverage, field health and pipeline.
 
 Synthetic data only (``*.example`` hosts, RFC 1918 / 5737 addresses).
 """
@@ -77,11 +77,11 @@ def of_kind(findings: list[Finding], kind: str) -> list[Finding]:
     return [f for f in findings if f.kind == kind]
 
 
-# ---- M8: decay is about volume through "now", and a silent child explains its parent --------------------------------
+# ---- decay is about volume through "now", and a silent child explains its parent --------------------------------
 
 
 def _mail_and_vpn(tenant: TenantConfig) -> tuple[Hours, datetime]:
-    """The reviewer's generic-CSV case: mail-01 sends 5/day and stops 4 days before the end; vpn-01 sends nothing
+    """A generic-CSV case: mail-01 sends 5/day and stops 4 days before the end; vpn-01 sends nothing
     until a burst of 80 events in the last 20 hours (the current, partial day)."""
     world = Hours(tenant, days=21)
     background(world)
@@ -101,7 +101,7 @@ def test_decay_counts_the_partial_current_day_so_a_resumed_source_is_not_declini
 
 
 def test_without_the_partial_day_the_same_data_would_claim_a_decay(monkeypatch: pytest.MonkeyPatch) -> None:
-    # guards the regression test above: the scenario really is the one the review saw (a false "fell to 0%")
+    # guards the regression test above: the scenario really is the reported one (a false "fell to 0%")
     monkeypatch.setattr(silence_mod._Engine, "_partial_day", lambda self, p1, last_day: None)
     world, now = _mail_and_vpn(TenantConfig(name="acme"))
     result = silence_run(world, now)
@@ -154,7 +154,7 @@ def test_explained_evidence_is_readable_in_both_languages() -> None:
     assert render(item, "es") == "linux_secure en mail-01.example: en silencio"
 
 
-# ---- IM5: learning is LOW everywhere --------------------------------------------------------------------------------
+# ---- learning is LOW everywhere --------------------------------------------------------------------------------
 
 
 def test_nothing_evaluable_is_a_low_learning_finding_and_the_section_stays_grey() -> None:
@@ -167,7 +167,7 @@ def test_nothing_evaluable_is_a_low_learning_finding_and_the_section_stays_grey(
     assert result.section["status"] == "not_assessed"
 
 
-# ---- m7: reproduce hints use the input's own field names ----------------------------------------------------------
+# ---- reproduce hints use the input's own field names ----------------------------------------------------------
 
 
 def _generic_hint(tenant: TenantConfig) -> tuple[str, dict[str, Any]]:
@@ -195,7 +195,7 @@ def test_generic_reproduce_hint_without_a_mapping_describes_instead_of_guessing(
     assert 'source:"' not in text
 
 
-# ---- m2: Wazuh wording only for Wazuh input -----------------------------------------------------------------------
+# ---- Wazuh wording only for Wazuh input -----------------------------------------------------------------------
 
 
 def test_global_silence_advice_names_wazuh_daemons_only_for_wazuh_data() -> None:
@@ -248,7 +248,7 @@ def test_partial_failure_messages_are_rendered_per_language() -> None:
     assert incomplete.evidence["partial_failure_examples"][0] is failure
 
 
-# ---- coverage: B2 (never a false green), FM14 (relayed hosts report), FM9 (not assessed per row) ----------------
+# ---- coverage: never a false green, relayed hosts report, not assessed per row ----------------
 
 
 def _host_events(host: str, start: datetime, end: datetime, sources: tuple[str, ...], step_h: float = 1.0,

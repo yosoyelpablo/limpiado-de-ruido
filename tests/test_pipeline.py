@@ -874,7 +874,7 @@ def test_engine_style_call() -> None:
     assert [f.kind for f in result.findings] == ["pipeline.lag"]
 
 
-# ---- regression tests (review) --------------------------------------------------------------------------------------
+# ---- regression tests --------------------------------------------------------------------------------------
 
 
 def test_batching_forwarder_lag_is_not_erased_as_a_timezone() -> None:

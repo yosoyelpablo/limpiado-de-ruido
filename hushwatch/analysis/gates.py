@@ -1666,14 +1666,15 @@ def _hours_label(seconds: float) -> str:
 register(
     {
         "noise.reason.learning": {
-            "en": "Only {days} day(s) of data (at least {min} needed): no tuning verdict yet",
-            "es": "Solo hay {days} día(s) de datos (se necesitan al menos {min}): todavía no hay veredicto",
+            "en": "Only {days} {days:plural:day|days} of data (at least {min} needed): no tuning verdict yet",
+            "es": "Solo hay {days} {days:plural:día|días} de datos (se necesitan al menos {min}): todavía no "
+            "hay veredicto",
         },
         "noise.reason.share": {
-            "en": "Explains {share:.0%} of the rule's {total} alerts (at least {lower} alerts; "
-            "minimum share {min:.0%})",
-            "es": "Explica el {share:.0%} de las {total} alertas de la regla (al menos {lower} alertas; "
-            "mínimo {min:.0%})",
+            "en": "Explains {share:.0%} of the rule's {total} {total:plural:alert|alerts} (at least {lower} "
+            "{lower:plural:alert|alerts}; minimum share {min:.0%})",
+            "es": "Explica el {share:.0%} de {total:plural:la única alerta|las {total} alertas} de la regla "
+            "(al menos {lower} {lower:plural:alerta|alertas}; mínimo {min:.0%})",
         },
         "noise.reason.level_ok": {
             "en": "Rule level {level} is within the tunable maximum ({max})",
@@ -1688,12 +1689,15 @@ register(
             "es": "Nivel de la regla desconocido: no se puede confirmar que esté dentro del máximo ajustable ({max})",
         },
         "noise.reason.tp": {
-            "en": "{tp} true-positive disposition(s) on this scope in the last {days} days",
-            "es": "{tp} disposición(es) de verdadero positivo en este alcance en los últimos {days} días",
+            "en": "{tp} true-positive {tp:plural:disposition|dispositions} on this scope in the last {days} days",
+            "es": "{tp} {tp:plural:disposición|disposiciones} de verdadero positivo en este alcance en los "
+            "últimos {days} días",
         },
         "noise.reason.tp_rule_wide": {
-            "en": "{tp} true-positive disposition(s) cover the whole rule in the last {days} days",
-            "es": "{tp} disposición(es) de verdadero positivo cubren toda la regla en los últimos {days} días",
+            "en": "{tp} true-positive {tp:plural:disposition covers|dispositions cover} the whole rule in the "
+            "last {days} days",
+            "es": "{tp} {tp:plural:disposición|disposiciones} de verdadero positivo {tp:plural:cubre|cubren} "
+            "toda la regla en los últimos {days} días",
         },
         "noise.reason.no_tp": {
             "en": "No true-positive dispositions on this scope in the last {days} days",
@@ -1723,20 +1727,22 @@ register(
             "es": "Presente en {present} de {days} días ({ratio:.0%}, mínimo {min:.0%})",
         },
         "noise.reason.burst": {
-            "en": "Burst: {peak} alerts on {day}, {factor:.1f}× the median of {median:.1f} per day "
-            "(limit {limit:.1f}×)",
-            "es": "Pico: {peak} alertas el {day}, {factor:.1f}× la mediana de {median:.1f} por día "
-            "(límite {limit:.1f}×)",
+            "en": "Burst: {peak} {peak:plural:alert|alerts} on {day}, {factor:.1f}× the median of "
+            "{median:.1f} per day (limit {limit:.1f}×)",
+            "es": "Pico: {peak} {peak:plural:alerta|alertas} el {day}, {factor:.1f}× la mediana de "
+            "{median:.1f} por día (límite {limit:.1f}×)",
         },
         "noise.reason.no_burst": {
-            "en": "No burst: busiest day {day} with {peak} alerts, {factor:.1f}× the median of {median:.1f} "
-            "(limit {limit:.1f}×)",
-            "es": "Sin picos: el día de más volumen ({day}) tuvo {peak} alertas, {factor:.1f}× la mediana de "
-            "{median:.1f} (límite {limit:.1f}×)",
+            "en": "No burst: busiest day {day} with {peak} {peak:plural:alert|alerts}, {factor:.1f}× the "
+            "median of {median:.1f} (limit {limit:.1f}×)",
+            "es": "Sin picos: el día de más volumen ({day}) tuvo {peak} {peak:plural:alerta|alertas}, "
+            "{factor:.1f}× la mediana de {median:.1f} (límite {limit:.1f}×)",
         },
         "noise.reason.co_occurrence": {
-            "en": "{entity} also appears in {count} alert(s) at level {level} or higher within ±{window}",
-            "es": "{entity} también aparece en {count} alerta(s) de nivel {level} o superior dentro de ±{window}",
+            "en": "{entity} also appears in {count} {count:plural:alert|alerts} at level {level} or higher "
+            "within ±{window}",
+            "es": "{entity} también aparece en {count} {count:plural:alerta|alertas} de nivel {level} o "
+            "superior dentro de ±{window}",
         },
         "noise.reason.co_occurrence_truncated": {
             "en": "The high-level alert index hit its size cap: co-occurrence with high alerts cannot be ruled out",
@@ -1831,15 +1837,16 @@ register(
             "en trusted_entities para avalarlo)",
         },
         "noise.evidence.tp": {
-            "en": "a clean triage record ({tp} alert(s) in this scope were confirmed as true positives)",
-            "es": "un historial de triaje limpio ({tp} alerta(s) de este alcance se confirmaron como verdaderos "
-            "positivos)",
+            "en": "a clean triage record ({tp} {tp:plural:alert|alerts} in this scope {tp:plural:was|were} "
+            "confirmed as true positives)",
+            "es": "un historial de triaje limpio ({tp} {tp:plural:alerta|alertas} de este alcance se "
+            "{tp:plural:confirmó|confirmaron} como verdaderos positivos)",
         },
         "noise.evidence.too_few": {
-            "en": "triage evidence: only {n} triaged alert(s) in this scope, at least {min_n} needed to measure "
-            "FP ≥ {min_fp:.0%}",
-            "es": "evidencia de triaje: solo {n} alerta(s) triadas en este alcance, se necesitan al menos {min_n} "
-            "para medir FP ≥ {min_fp:.0%}",
+            "en": "triage evidence: only {n} triaged {n:plural:alert|alerts} in this scope, at least {min_n} "
+            "needed to measure FP ≥ {min_fp:.0%}",
+            "es": "evidencia de triaje: solo {n} {n:plural:alerta triada|alertas triadas} en este alcance, se "
+            "necesitan al menos {min_n} para medir FP ≥ {min_fp:.0%}",
         },
         "noise.evidence.low_fp": {
             "en": "enough false positives: dispositions show FP ≥ {fp:.0%} (n={n}), below the required {min_fp:.0%}",
@@ -1901,12 +1908,12 @@ register(
             "agregue con frequency/timeframe en lugar de silenciar",
         },
         "noise.reason.dependents": {
-            "en": "Rule {rule} feeds correlation rule(s) {dependents}: review required. Those rules may stop "
-            "counting demoted events (copying the parent's groups into the child does not keep if_matched_group "
-            "rules counting them); validate with wazuh-logtest",
-            "es": "La regla {rule} alimenta la(s) regla(s) de correlación {dependents}: requiere revisión. Esas "
-            "reglas pueden dejar de contar los eventos degradados (copiar los grupos de la regla padre en la hija "
-            "no mantiene el conteo de las reglas if_matched_group); valide con wazuh-logtest",
+            "en": "Rule {rule} feeds correlation rules ({dependents}): review required. Those rules may stop "
+            "counting demoted events (copying the parent's groups into the child does not keep "
+            "if_matched_group rules counting them); validate with wazuh-logtest",
+            "es": "La regla {rule} alimenta reglas de correlación ({dependents}): requiere revisión. Esas "
+            "reglas pueden dejar de contar los eventos degradados (copiar los grupos de la regla padre "
+            "en la hija no mantiene el conteo de las reglas if_matched_group); valide con wazuh-logtest",
         },
         "noise.reason.dependents_error": {
             "en": "Could not determine which rules correlate on rule {rule}: review required",

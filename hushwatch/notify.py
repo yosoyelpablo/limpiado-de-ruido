@@ -90,8 +90,9 @@ register(
             "es": "hushwatch · {tenant}: ejecución completada ({at})",
         },
         "notify.heartbeat.critical": {
-            "en": "hushwatch · {tenant}: run completed ({at}); {n} critical finding(s) open",
-            "es": "hushwatch · {tenant}: ejecución completada ({at}); {n} hallazgo(s) crítico(s) abierto(s)",
+            "en": "hushwatch · {tenant}: run completed ({at}); {n} critical {n:plural:finding|findings} open",
+            "es": "hushwatch · {tenant}: ejecución completada ({at}); {n} {n:plural:hallazgo crítico "
+            "abierto|hallazgos críticos abiertos}",
         },
         "notify.heartbeat.fail": {
             "en": "hushwatch · {tenant}: run FAILED or incomplete ({at})",

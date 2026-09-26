@@ -138,9 +138,9 @@ register(
         "indexer.err.context_lost": {
             "en": "The search context on {url} expired or was lost during '{op}' (HTTP 404: {reason}); the "
             "document stream is incomplete. Re-run; pages must be consumed within {keep_alive}.",
-            "es": "El contexto de búsqueda en {url} caducó o se perdió durante '{op}' (HTTP 404: {reason}); la "
-            "descarga de documentos está incompleta. Vuelva a ejecutarlo; cada página debe consumirse en menos de "
-            "{keep_alive}.",
+            "es": "El contexto de búsqueda en {url} venció o se perdió durante '{op}' (HTTP 404: {reason}); "
+            "la descarga de documentos está incompleta. Vuelva a ejecutarlo; cada página debe "
+            "consumirse en menos de {keep_alive}.",
         },
         "indexer.partial.shards": {
             "en": "'{op}' on {index}: {failed} of {total} shards failed ({reason}); results are incomplete.",
@@ -209,7 +209,7 @@ register(
         },
         "indexer.note.close_failed": {
             "en": "Could not release the {what} context on {url} ({reason}); it expires by itself after {keep_alive}.",
-            "es": "No se pudo liberar el contexto {what} en {url} ({reason}); caduca solo tras {keep_alive}.",
+            "es": "No se pudo liberar el contexto {what} en {url} ({reason}); vence solo tras {keep_alive}.",
         },
         "indexer.hint.ca": {
             "en": " (for a Wazuh indexer: the root-ca.pem created at install time, e.g. "

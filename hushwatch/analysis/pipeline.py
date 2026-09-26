@@ -105,9 +105,10 @@ register(
             "es": "No se leyó ningún evento: no se pudo evaluar ruido, silencio ni cobertura.",
         },
         "pipeline.basis.bad_timestamps": {
-            "en": "{count} events ({share:.1%}) had unparseable timestamps and were left out of time-based analyses.",
-            "es": "{count} eventos ({share:.1%}) tenían marcas de tiempo ilegibles y quedaron fuera de los análisis "
-            "temporales.",
+            "en": "{count} {count:plural:event|events} ({share:.1%}) had unparseable timestamps and "
+            "{count:plural:was|were} left out of time-based analyses.",
+            "es": "{count} {count:plural:evento|eventos} ({share:.1%}) {count:plural:tenía|tenían} marcas de "
+            "tiempo ilegibles y {count:plural:quedó|quedaron} fuera de los análisis temporales.",
         },
         "pipeline.basis.malformed": {
             "en": "{count} lines or documents ({share:.1%}) could not be parsed.",
@@ -133,8 +134,9 @@ register(
         },
         # clock skew / freshness -----------------------------------------------------------------------------
         "pipeline.skew.title": {
-            "en": "{count} events have timestamps in the future (clock skew)",
-            "es": "{count} eventos tienen marcas de tiempo en el futuro (desfase de reloj)",
+            "en": "{count} {count:plural:event has a timestamp|events have timestamps} in the future (clock skew)",
+            "es": "{count} {count:plural:evento tiene una marca|eventos tienen marcas} de tiempo en el futuro "
+            "(desfase de reloj)",
         },
         "pipeline.skew.reason": {
             "en": "{count} of {events} events ({share:.2%}) are more than 5 minutes ahead of the wall clock. A "
@@ -164,8 +166,8 @@ register(
         },
         # manager daemons ------------------------------------------------------------------------------------
         "pipeline.drops.title.analysisd": {
-            "en": "wazuh-analysisd dropped {dropped} events: detection never saw them",
-            "es": "wazuh-analysisd descartó {dropped} eventos: la detección nunca los vio",
+            "en": "wazuh-analysisd dropped {dropped} {dropped:plural:event|events}: detection never saw them",
+            "es": "wazuh-analysisd descartó {dropped} {dropped:plural:evento|eventos}: la detección nunca los vio",
         },
         "pipeline.drops.title.remoted": {
             "en": "wazuh-remoted discarded {dropped} messages from agents",
@@ -184,10 +186,10 @@ register(
             "es": "wazuh-remoted descartó {count} mensajes hacia los agentes (cola de envío llena)",
         },
         "pipeline.drops.reason.analysisd": {
-            "en": "{dropped} events were dropped because the analysis queues were full or the EPS limit was "
-            "reached{top}.",
-            "es": "Se descartaron {dropped} eventos porque las colas de análisis estaban llenas o se alcanzó el "
-            "límite de EPS{top}.",
+            "en": "{dropped} {dropped:plural:event was|events were} dropped because the analysis queues were "
+            "full or the EPS limit was reached{top}.",
+            "es": "Se {dropped:plural:descartó|descartaron} {dropped} {dropped:plural:evento|eventos} porque "
+            "las colas de análisis estaban llenas o se alcanzó el límite de EPS{top}.",
         },
         "pipeline.drops.reason.top": {"en": "; mostly from {sources}", "es": "; sobre todo de {sources}"},
         "pipeline.drops.reason.remoted": {

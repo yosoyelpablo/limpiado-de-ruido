@@ -2959,9 +2959,10 @@ register(
             "es": "Fuente en silencio ({key}): ningún evento desde hace {gap}",
         },
         "silence.title.drop": {
-            "en": "Volume drop: {key} sent {observed} events in the last {hours} h, about {expected:,.0f} expected",
-            "es": "Caída de volumen ({key}): {observed} eventos en las últimas {hours} h, frente a unos "
-            "{expected:,.0f} esperados",
+            "en": "Volume drop: {key} sent {observed} {observed:plural:event|events} in the last {hours} h, "
+            "about {expected:,.0f} expected",
+            "es": "Caída de volumen ({key}): {observed} {observed:plural:evento|eventos} en las últimas "
+            "{hours} h, frente a unos {expected:,.0f} esperados",
         },
         "silence.title.decay": {
             "en": "Sustained decline: the daily volume of {key} fell to {ratio:.0%} of its reference",
@@ -3019,10 +3020,10 @@ register(
             "es": "No se pudo evaluar el silencio: ninguna fuente tiene todavía {days} días de historial utilizable",
         },
         "silence.title.truncated": {
-            "en": "Silence analysis incomplete: the key cap ({max_keys}) was reached and {dropped} events were not "
-            "tracked",
-            "es": "Análisis de silencio incompleto: se alcanzó el límite de claves ({max_keys}) y {dropped} eventos no "
-            "se contabilizaron",
+            "en": "Silence analysis incomplete: the key cap ({max_keys}) was reached and {dropped} "
+            "{dropped:plural:event was|events were} not tracked",
+            "es": "Análisis de silencio incompleto: se alcanzó el límite de claves ({max_keys}) y {dropped} "
+            "{dropped:plural:evento no se contabilizó|eventos no se contabilizaron}",
         },
         # reasons
         "silence.reason.p0": {
@@ -3032,10 +3033,11 @@ register(
             "probabilidad de no ver ninguno es {p0:.1e} (umbral de alarma {alpha:.1e}).",
         },
         "silence.reason.drop": {
-            "en": "Observed {observed} events vs about {expected:,.0f} expected ({ratio:.0%}); negative-binomial "
-            "lower tail p = {p:.1e} (threshold {alpha:.1e}).",
-            "es": "Se observaron {observed} eventos frente a unos {expected:,.0f} esperados ({ratio:.0%}); cola "
-            "inferior binomial negativa p = {p:.1e} (umbral {alpha:.1e}).",
+            "en": "Observed {observed} {observed:plural:event|events} vs about {expected:,.0f} expected "
+            "({ratio:.0%}); negative-binomial lower tail p = {p:.1e} (threshold {alpha:.1e}).",
+            "es": "Se {observed:plural:observó|observaron} {observed} {observed:plural:evento|eventos} frente "
+            "a unos {expected:,.0f} esperados ({ratio:.0%}); cola inferior binomial negativa p = "
+            "{p:.1e} (umbral {alpha:.1e}).",
         },
         "silence.reason.drop_since": {
             "en": "Since the drop began (about {since}): {observed} events vs about {expected:,.0f} expected "
@@ -3151,7 +3153,10 @@ register(
             "es": "Con su tráfico normal ({rate:,.2f} eventos/h) un silencio solo es detectable estadísticamente "
             "tras {t_min}; el SLA del nivel {tier} es {sla}.",
         },
-        "silence.duration.about": {"en": "about {duration}", "es": "unas {duration}"},
+        "silence.duration.about": {
+            "en": "about {duration}",
+            "es": "aproximadamente {duration}",
+        },
         "silence.duration.beyond": {"en": "more than {duration}", "es": "más de {duration}"},
         "silence.reason.learning": {
             "en": "Keys still learning: {count} (critical agents among them: {critical}). A key is evaluated once it "

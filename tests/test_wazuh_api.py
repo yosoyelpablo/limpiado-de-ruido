@@ -26,7 +26,7 @@ from hushwatch.net import RemoteError
 
 UTC = timezone.utc
 USER = "hushwatch_ro"
-PASSWORD = "Api-S3cret-not-real!"
+PASSWORD = "FAKE-test-api-password!"
 AUTH = "/security/user/authenticate"
 
 Handler = Callable[[httpx.Request], httpx.Response]

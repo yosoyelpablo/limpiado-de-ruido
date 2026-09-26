@@ -471,12 +471,14 @@ register(
             "es": "El agente {host} está conectado pero no envió eventos en los datos analizados ({duration})",
         },
         "coverage.agent.no_data.reason": {
-            "en": "Last keepalive {last_keepalive} (status active), last event {last_event}. The agent is alive, so "
-            "the problem is log collection (localfile configuration, permissions, agent buffer), not connectivity.",
-            "es": "Último keepalive {last_keepalive} (estado active), último evento {last_event}. El agente está "
-            "vivo, así que el problema es la recolección de logs (configuración localfile, permisos, buffer del "
-            "agente), no la conectividad.",
+            "en": "Last keepalive {last_keepalive} (status active), last event: {last_event}. The agent is "
+            "alive, so the problem is log collection (localfile configuration, permissions, agent "
+            "buffer), not connectivity.",
+            "es": "Último keepalive {last_keepalive} (estado activo), último evento: {last_event}. El agente "
+            "está vivo, así que el problema es la recolección de logs (configuración localfile, "
+            "permisos, buffer del agente), no la conectividad.",
         },
+        "coverage.agent.no_events": {"en": "none in the analyzed data", "es": "ninguno en los datos analizados"},
         "coverage.agent.no_data.alerts_caveat": {
             "en": "Measured on alerts only: a quiet host may legitimately produce no alerts; confirm with archives "
             "or the agent's logcollector statistics.",
@@ -1994,7 +1996,7 @@ def _no_data(host: _Host, agent: AgentInfo, ctx: _Context, window_s: float) -> _
         M(
             "coverage.agent.no_data.reason",
             last_keepalive=_iso_dt(agent.last_keepalive) or "?",
-            last_event=last_event or "-",
+            last_event=last_event or M("coverage.agent.no_events"),
         )
     ]
     reasons.extend(_no_data_caveats(ctx))

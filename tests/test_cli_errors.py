@@ -1,4 +1,4 @@
-"""F1 regression tests (system review): CLI error handling and exit codes, cron mode (``check``), fleet, doctor,
+"""Regression tests: CLI error handling and exit codes, cron mode (``check``), fleet, doctor,
 engine honesty (never a false green) and the indexer event source. Synthetic data only; no network (HTTP clients
 and the Wazuh API are replaced by fakes)."""
 
@@ -297,7 +297,7 @@ def test_check_counts_delivered_notifications_and_fails_when_a_target_fails(
     stderr = text(result.stderr)
     assert stderr.count("notification not delivered") == 1  # one line per failure, never repeated by a logger
     assert stderr.count("heartbeat not delivered") == 1
-    match = re.search(r"(\d+) of (\d+) notification\(s\) delivered", text(result.stdout))
+    match = re.search(r"(\d+) of (\d+) notifications? delivered", text(result.stdout))
     assert match and match.group(1) == "0" and int(match.group(2)) > 0
     # handed back: the next run sends them again
     ok = Recorder().install(monkeypatch)
@@ -459,16 +459,16 @@ def test_indexer_failure_in_the_middle_of_a_pass_is_partial_not_a_crash() -> Non
 
 def test_unexpected_errors_are_one_clean_line(alerts: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("exploded near https://hooks.example/services/SECRETPATH?token=abc")
+        raise RuntimeError("exploded near https://hooks.example/services/FAKE-webhook-path?token=FAKE-test-token")
 
     monkeypatch.setattr(cli, "analyze", boom)
     result = run("report", alerts, "--now", NOW)
     assert result.exit_code == 3
     stderr = text(result.stderr)
     assert "unexpected RuntimeError" in stderr and "use -v for details" in stderr
-    assert "Traceback" not in stderr and "SECRETPATH" not in stderr
+    assert "Traceback" not in stderr and "FAKE-webhook-path" not in stderr
     verbose = run("report", alerts, "--now", NOW, "-v")
-    assert verbose.exit_code == 3 and "Traceback" in verbose.stderr and "SECRETPATH" not in verbose.stderr
+    assert verbose.exit_code == 3 and "Traceback" in verbose.stderr and "FAKE-webhook-path" not in verbose.stderr
     spanish = run("report", alerts, "--now", NOW, "--lang", "es")
     assert "fallo inesperado: RuntimeError" in text(spanish.stderr) and "use -v para ver los detalles" in text(
         spanish.stderr
@@ -563,20 +563,21 @@ def test_verbose_logging_never_prints_webhook_secrets() -> None:
         assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
         assert not logging.getLogger("httpcore").isEnabledFor(logging.DEBUG)
         logging.getLogger("hushwatch.test").warning(
-            "HTTP Request: POST %s", "https://hooks.slack.com/services/T0SECRET/B0SECRET/XYZ?token=abc"
+            "HTTP Request: POST %s",
+            "https://hooks.slack.example/services/FAKE0/FAKE1/FAKE-webhook-path?token=FAKE-test-token",
         )
     finally:
         root.removeHandler(handler)
         root.setLevel(logging.WARNING)
-    assert records and "hooks.slack.com" in records[-1]
-    assert "T0SECRET" not in records[-1] and "token=abc" not in records[-1]
+    assert records and "hooks.slack.example" in records[-1]
+    assert "FAKE0" not in records[-1] and "FAKE-test-token" not in records[-1]
 
 
 def test_cli_messages_follow_lang(tmp_path: Path) -> None:
     result = run("report", "--lang", "es")
     assert result.exit_code == 2 and "no hay entrada" in text(result.stderr)
     doctor = run("doctor", "--lang", "es")
-    assert "cómo corregirlo" in text(doctor.stdout) and "control(es)" in text(doctor.stdout)
+    assert "cómo corregirlo" in text(doctor.stdout) and "controles:" in text(doctor.stdout)
 
 
 def test_help_documents_redaction_keys_force_and_agents() -> None:
@@ -733,7 +734,7 @@ def test_emit_findings_count_only_the_suggestions_not_written(tmp_path: Path, mo
     assert received == ["tune", "volume"]  # index-volume suggestions are explained in VALIDATION.md
     by_kind = {f.kind: f for f in findings}
     assert by_kind["noise.emit_skipped"].reasons == [skip]
-    assert "1 tuning suggestion(s)" in render(by_kind["noise.emit_skipped"].title)
+    assert "1 tuning suggestion was" in render(by_kind["noise.emit_skipped"].title)
     assert by_kind["noise.emit_notes"].reasons == [note]
 
 

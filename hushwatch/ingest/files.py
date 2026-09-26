@@ -83,13 +83,14 @@ _ECS_ALERT_KINDS: Final = ("alert", "signal")  # ECS event.kind values of detect
 register(
     {
         "ingest.warn.alerts_only_wazuh": {
-            "en": "The input contains only Wazuh alerts: events that matched a rule at or above log_alert_level "
-            "(3 by default). Silence measured here is alert silence, not log-source silence, so a quiet host may "
-            "still be healthy. Enable logall_json (archives) for full-fidelity silence detection.",
-            "es": "La entrada solo contiene alertas de Wazuh: eventos que coincidieron con una regla de nivel igual "
-            "o superior a log_alert_level (3 por defecto). El silencio medido aquí es silencio de alertas, no de la "
-            "fuente de logs, así que un host silencioso puede estar sano. Active logall_json (archives) para "
-            "detectar silencios con fidelidad completa.",
+            "en": "The input contains only Wazuh alerts: events that matched a rule at or above "
+            "log_alert_level (3 by default). Silence measured here is alert silence, not log-source "
+            "silence, so a quiet host may still be healthy. Enable logall_json (archives) for "
+            "full-fidelity silence detection.",
+            "es": "La entrada solo contiene alertas de Wazuh: eventos que coincidieron con una regla de nivel "
+            "igual o superior a log_alert_level (3 por defecto). El silencio medido aquí es silencio de "
+            "alertas, no de la fuente de logs, así que un equipo silencioso puede estar sano. Active "
+            "logall_json (archives) para detectar silencios con fidelidad completa.",
         },
         "ingest.warn.alerts_only": {
             "en": "The input contains only alerts, not raw events. Silence measured here is alert silence, not "
@@ -133,10 +134,12 @@ register(
             "es": "{path} no contiene archivos de datos (.json, .ndjson, .jsonl, .csv o .tsv, opcionalmente .gz).",
         },
         "ingest.warn.skipped_files": {
-            "en": "{count} file(s) in the input directories were not read because they do not hold JSON, NDJSON or "
-            "CSV events (for example {examples}). Convert or rename them if they contain events.",
-            "es": "No se leyeron {count} archivo(s) de los directorios de entrada porque no contienen eventos JSON, "
-            "NDJSON ni CSV (por ejemplo {examples}). Conviértalos o cámbieles el nombre si contienen eventos.",
+            "en": "{count} {count:plural:file|files} in the input directories {count:plural:was|were} not "
+            "read because {count:plural:it does|they do} not hold JSON, NDJSON or CSV events (for "
+            "example {examples}). Convert or rename them if they contain events.",
+            "es": "No se {count:plural:leyó|leyeron} {count} {count:plural:archivo|archivos} de los "
+            "directorios de entrada porque no contienen eventos JSON, NDJSON ni CSV (por ejemplo "
+            "{examples}). Conviértalos o cámbieles el nombre si contienen eventos.",
         },
         "ingest.warn.list_error": {
             "en": "Directory {path} could not be listed ({error}); the files inside it were not analyzed.",
@@ -208,19 +211,21 @@ register(
             "este equipo.",
         },
         "ingest.warn.naive_utc": {
-            "en": "{count} file(s), for example {file}, have timestamps without a timezone offset; they were read as "
-            "UTC. If they are local times, set naive_timezone for this input: otherwise every event is shifted by "
-            "the UTC offset, which looks like silence followed by a burst.",
-            "es": "{count} archivo(s), por ejemplo {file}, tienen marcas de tiempo sin desfase horario; se "
-            "interpretaron como UTC. Si son horas locales, configure naive_timezone en esta entrada: de lo "
-            "contrario todos los eventos quedan desplazados según el desfase respecto a UTC, lo que parece un "
-            "silencio seguido de una ráfaga.",
+            "en": "{count} {count:plural:file|files}, for example {file}, {count:plural:has|have} timestamps "
+            "without a timezone offset; they were read as UTC. If they are local times, set "
+            "naive_timezone for this input: otherwise every event is shifted by the UTC offset, which "
+            "looks like silence followed by a burst.",
+            "es": "{count} {count:plural:archivo|archivos}, por ejemplo {file}, {count:plural:tiene|tienen} "
+            "marcas de tiempo sin desfase horario; se interpretaron como UTC. Si son horas locales, "
+            "configure naive_timezone en esta entrada: de lo contrario todos los eventos quedan "
+            "desplazados según el desfase respecto a UTC, lo que parece un silencio seguido de una "
+            "ráfaga.",
         },
         "ingest.warn.fields_capped": {
-            "en": "{count} events had more than {limit} fields; only the first {limit} and the fields hushwatch "
-            "relies on were kept.",
-            "es": "{count} eventos tenían más de {limit} campos; solo se conservaron los {limit} primeros y los "
-            "campos que usa hushwatch.",
+            "en": "{count} {count:plural:event|events} had more than {limit} fields; only the first {limit} "
+            "and the fields hushwatch relies on were kept.",
+            "es": "{count} {count:plural:evento tenía|eventos tenían} más de {limit} campos; solo se "
+            "conservaron los {limit} primeros y los campos que usa hushwatch.",
         },
     }
 )

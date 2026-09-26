@@ -1,4 +1,4 @@
-"""Regression tests for the ingest fixes of the system review (F3): the cheap backtest pass (``iter_rules``),
+"""Ingest regression tests: the cheap backtest pass (``iter_rules``),
 files skipped in input directories, events excluded by the time window, translatable partial failures and the
 Wazuh 4 fast normalization path.
 
@@ -7,6 +7,7 @@ Synthetic data only (``*.example`` hosts, RFC 1918 / 5737 addresses).
 
 from __future__ import annotations
 
+import base64
 import gzip
 import json
 import random
@@ -168,7 +169,7 @@ def test_directories_read_json_logs_whatever_their_extension_and_list_the_rest(t
     assert skipped == ["g.bin", "notes.txt"]  # hidden files are never data and are not listed
     warning = next(w for w in source.basis.warnings if isinstance(w, Message) and w.key == "ingest.warn.skipped_files")
     assert warning.params["count"] == 2
-    assert "2 file(s)" in render(warning) and "2 archivo(s)" in render(warning, "es")
+    assert "2 files" in render(warning) and "2 archivos" in render(warning, "es")
 
 
 def test_wazuh_plain_text_and_checksum_twins_are_skipped_silently(tmp_path: Path) -> None:
@@ -227,39 +228,45 @@ def test_indexer_and_api_fold_translatable_failures_into_the_basis() -> None:
     from hushwatch.ingest.wazuh_api import WazuhAPI
 
     idx = IndexerClient(
-        InputConfig(type="indexer", url="https://indexer.example:9200", username="hw", password="S3cretPass!"),
+        InputConfig(type="indexer", url="https://indexer.example:9200", username="hw", password="FAKE-pw!"),
         transport=httpx.MockTransport(lambda request: httpx.Response(500)),
     )
-    idx._record(M("indexer.partial.shards", op="search", index="wazuh-*", failed=2, total=3, reason="x S3cretPass!"))
+    idx._record(M("indexer.partial.shards", op="search", index="wazuh-*", failed=2, total=3, reason="x FAKE-pw!"))
     basis = DataBasis()
     idx.apply_to(basis)
     idx.apply_to(basis)  # idempotent
     [failure] = basis.partial_failures
     assert isinstance(failure, Message) and failure.key == "indexer.partial.shards"
-    assert "S3cretPass!" not in render(failure) and "***" in render(failure)
+    assert "FAKE-pw!" not in render(failure) and "***" in render(failure)
     assert "fallaron 2 de 3 shards" in render(failure, "es")
     api = WazuhAPI(
-        ApiConfig(url="https://manager.example:55000", username="wazuh", password="S3cretPass!"),
+        ApiConfig(url="https://manager.example:55000", username="wazuh", password="FAKE-test-pass!"),
         transport=httpx.MockTransport(lambda request: httpx.Response(500)),
     )
-    api._record(M("wazuh_api.partial.flagged", op="agents S3cretPass!", code=1))
+    api._record(M("wazuh_api.partial.flagged", op="agents FAKE-test-pass!", code=1))
     api.apply_to(basis)
     assert len(basis.partial_failures) == 2 and isinstance(basis.partial_failures[1], Message)
-    assert "S3cretPass!" not in render(basis.partial_failures[1])
+    assert "FAKE-test-pass!" not in render(basis.partial_failures[1])
+
+
+def _fake_jwt() -> str:
+    """A JWT-shaped test value built at run time (header.claims.signature), obviously fake."""
+    parts = (b'{"alg":"HS256"}', b'{"sub":"FAKE-test-subject"}', b"FAKE-signature")
+    return ".".join(base64.urlsafe_b64encode(raw).rstrip(b"=").decode() for raw in parts)
 
 
 def test_sanitize_message_cleans_nested_params_and_entities() -> None:
     msg = M(
         "x.outer",
-        reason=M("x.inner", detail="token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig\x07 secret123"),
+        reason=M("x.inner", detail=f"token={_fake_jwt()}\x07 FAKE-secret"),
         host=Entity("host", "h1‮.example"),
-        items=["a secret123", 3],
+        items=["a FAKE-secret", 3],
         count=4,
     )
-    clean = sanitize_message(msg, secrets=["secret123"])
+    clean = sanitize_message(msg, secrets=["FAKE-secret"])
     assert clean.params["count"] == 4
     inner = clean.params["reason"].params["detail"]
-    assert "secret123" not in inner and "eyJ…[token]" in inner and "\x07" not in inner
+    assert "FAKE-secret" not in inner and "eyJ…[token]" in inner and "\x07" not in inner
     assert clean.params["host"] == Entity("host", "h1 .example")
     assert clean.params["items"] == ["a ***", 3]
 

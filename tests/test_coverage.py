@@ -921,7 +921,7 @@ def test_random_names_do_not_break_join() -> None:
     assert len(listed) == len(set(listed))
 
 
-# ---- regression tests (review) --------------------------------------------------------------------------------------
+# ---- regression tests --------------------------------------------------------------------------------------
 
 
 def test_contract_event_rate_is_not_judged_on_alerts_only_data() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import shutil
 import ssl
 import subprocess
@@ -29,8 +30,19 @@ from hushwatch.net import (
     validate_base_url,
 )
 
-PASSWORD = "Tr0ub4dor&3-not-real"
-JWT = "eyJhbGciOiJFUzUxMiJ9.eyJpc3MiOiJ3YXp1aCIsImV4cCI6MTcwMDAwMDkwMH0.c2lnbmF0dXJlLW5vdC1yZWFs"
+PASSWORD = "FAKE&test-password-3"
+
+
+def _fake_jwt(claims: bytes) -> str:
+    """A JWT-shaped test value built at run time (header.claims.signature), obviously fake."""
+
+    def part(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return ".".join((part(b'{"alg":"ES512"}'), part(claims), part(b"FAKE-signature")))
+
+
+JWT = _fake_jwt(b'{"iss":"FAKE-test-issuer","exp":1700000900}')
 
 
 class FakeClock:
@@ -265,12 +277,12 @@ def test_redact_secret() -> None:
 def test_sanitize_text_scrubs_secrets_controls_and_truncates() -> None:
     pit = "46ToAwMDaWR5BXV1aWQyKwZub2RlXzMAAAAAAAAAACoBYwADaWR4BXV1aWQxAgZub2RlXzEAAAAAAAAAAAEBYQADaWR5"
     raw = (
-        f"bad pit [{pit}] password={PASSWORD} token {JWT} Authorization: Bearer abcDEF123456ghiJKL=\n"
+        f"bad pit [{pit}] password={PASSWORD} token {JWT} Authorization: Bearer FAKE-test-bearer-token=\n"
         "\x1b[31mred\x1b[0m \u202eevil\u202c tail"
     )
     text = sanitize_text(raw, limit=1000, secrets=[pit, PASSWORD, None, ""])
     assert pit not in text and PASSWORD not in text and JWT not in text
-    assert "abcDEF123456ghiJKL" not in text
+    assert "FAKE-test-bearer-token" not in text
     assert "\x1b" not in text and "\u202e" not in text and "\n" not in text
     assert "Bearer ***" in text
     assert len(sanitize_text("x" * 5000, limit=50)) == 50

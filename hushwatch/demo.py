@@ -133,7 +133,7 @@ register(
         },
         "demo.scenario.trap.slow_burn": {
             "en": "Internal host {ip} probing {host} during the whole window, with a successful web attack",
-            "es": "El host interno {ip} sondea {host} durante toda la ventana, con un ataque web exitoso",
+            "es": "El equipo interno {ip} sondea {host} durante toda la ventana, con un ataque web exitoso",
         },
         "demo.scenario.trap.macro_powershell": {
             "en": "A Word macro started encoded PowerShell on {host}, hidden inside noisy process-creation rules",
@@ -163,8 +163,8 @@ register(
         },
         "demo.scenario.silence.rule_format_changed": {
             "en": "Rule {rule_id} stopped matching on every Linux host after a PAM message format change",
-            "es": "La regla {rule_id} dejó de coincidir en todos los hosts Linux tras un cambio de formato del mensaje "
-            "de PAM",
+            "es": "La regla {rule_id} dejó de coincidir en todos los equipos Linux tras un cambio de formato "
+            "del mensaje de PAM",
         },
         "demo.scenario.silence.laptops_off_hours": {
             "en": "Laptops powered off at night, on weekends and on the holiday (no finding expected)",

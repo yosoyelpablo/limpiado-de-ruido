@@ -261,7 +261,7 @@ register(
     {
         "wazuh.audit.title.risky": {
             "en": "Risky suppression: local rule {rule} ({file})",
-            "es": "Supresión arriesgada: regla local {rule} ({file})",
+            "es": "Supresión riesgosa: regla local {rule} ({file})",
         },
         "wazuh.audit.title.undocumented": {
             "en": "Undocumented suppression: local rule {rule} ({file})",
@@ -284,8 +284,8 @@ register(
             "es": "nivel reducido a {level}",
         },
         "wazuh.audit.reason.whole_rule": {
-            "en": "It mutes rule(s) {parents} entirely ({action}): no condition narrows the scope",
-            "es": "Silencia por completo la(s) regla(s) {parents} ({action}): ninguna condición acota el alcance",
+            "en": "It mutes its parent rules ({parents}) entirely ({action}): no condition narrows the scope",
+            "es": "Silencia por completo sus reglas padre ({parents}) ({action}): ninguna condición acota el alcance",
         },
         "wazuh.audit.reason.unanchored": {
             "en": "Substring matching on {conditions}: an unanchored value such as 'admin' also matches "
@@ -298,37 +298,39 @@ register(
             "es": "Rango de red muy amplio en {conditions}",
         },
         "wazuh.audit.reason.attacker_only": {
-            "en": "Only attacker-controllable conditions ({conditions}): anyone who can write that value into a log "
-            "is hidden; add a stable anchor (agent/host, internal IP, log file)",
-            "es": "Solo condiciones controlables por un atacante ({conditions}): cualquiera que pueda escribir ese "
-            "valor en un log queda oculto; añada un ancla estable (agente/host, IP interna, archivo de log)",
+            "en": "Only attacker-controllable conditions ({conditions}): anyone who can write that value into "
+            "a log is hidden; add a stable anchor (agent/host, internal IP, log file)",
+            "es": "Solo condiciones controlables por un atacante ({conditions}): cualquiera que pueda "
+            "escribir ese valor en un log queda oculto; agregue un ancla estable (agente o equipo, IP "
+            "interna, archivo de log)",
         },
         "wazuh.audit.reason.breaks_correlation": {
-            "en": "Rule(s) {parents} feed correlation rule(s) {dependents}: events caught here no longer count for "
-            "them, so for example brute-force detection stops for this scope",
-            "es": "La(s) regla(s) {parents} alimentan la(s) regla(s) de correlación {dependents}: los eventos que "
-            "captura esta regla dejan de contar para ellas; por ejemplo, la detección de fuerza bruta se detiene "
-            "en este ámbito",
+            "en": "Its parent rules ({parents}) feed correlation rules ({dependents}): events caught here no "
+            "longer count for them, so for example brute-force detection stops for this scope",
+            "es": "Sus reglas padre ({parents}) alimentan reglas de correlación ({dependents}): los eventos "
+            "que captura esta regla dejan de contar para ellas; por ejemplo, la detección de fuerza "
+            "bruta se detiene en este alcance",
         },
         "wazuh.audit.reason.preempts": {
-            "en": "analysisd tries it before other children of rule(s) {parents}, so rule(s) {rules} (up to level "
-            "{level}) never fire for the events it catches",
-            "es": "analysisd la evalúa antes que otras hijas de la(s) regla(s) {parents}, así que la(s) regla(s) "
-            "{rules} (hasta nivel {level}) nunca se disparan para los eventos que captura",
+            "en": "analysisd tries it before the other children of its parent rules ({parents}), so these "
+            "rules ({rules}, up to level {level}) never fire for the events it catches",
+            "es": "analysisd la evalúa antes que las otras hijas de sus reglas padre ({parents}), así que "
+            "estas reglas ({rules}, hasta nivel {level}) nunca se disparan para los eventos que captura",
         },
         "wazuh.audit.reason.high_level": {
             "en": "It mutes rule {parent}, level {level} (high-severity threshold is {high_level})",
             "es": "Silencia la regla {parent}, de nivel {level} (el umbral de severidad alta es {high_level})",
         },
         "wazuh.audit.reason.sensitive": {
-            "en": "It mutes rule {parent}, mapped to sensitive ATT&CK tactic(s): {tactics}",
-            "es": "Silencia la regla {parent}, asociada a táctica(s) ATT&CK sensibles: {tactics}",
+            "en": "It mutes rule {parent}, mapped to sensitive ATT&CK tactics: {tactics}",
+            "es": "Silencia la regla {parent}, asociada a tácticas ATT&CK sensibles: {tactics}",
         },
         "wazuh.audit.reason.missing_parent": {
-            "en": "It is attached to rule(s) {ids}, which are not in the loaded ruleset or load after it: analysisd "
-            "discards a child whose parent is not loaded yet, so it may never run",
-            "es": "Está asociada a la(s) regla(s) {ids}, que no están en el ruleset cargado o se cargan después: "
-            "analysisd descarta una regla hija cuya padre aún no está cargada, así que podría no ejecutarse nunca",
+            "en": "It is attached to parent rules ({ids}) that are not in the loaded ruleset or load after "
+            "it: analysisd discards a child whose parent is not loaded yet, so it may never run",
+            "es": "Está asociada a reglas padre ({ids}) que no están en el ruleset cargado o se cargan "
+            "después: analysisd descarta una regla hija cuya padre aún no está cargada, así que podría "
+            "no ejecutarse nunca",
         },
         "wazuh.audit.reason.no_description": {
             "en": "No description: nobody can tell why this suppression exists or when to remove it",
@@ -349,7 +351,7 @@ register(
             "dispara más tarde o con menos frecuencia",
         },
         "wazuh.audit.reason.overwrite_groups": {
-            "en": "It overwrites rule {rule} dropping groups that correlation rule(s) {dependents} rely on",
+            "en": "It overwrites rule {rule} dropping groups that correlation rules ({dependents}) rely on",
             "es": "Sobrescribe la regla {rule} quitando grupos de los que dependen las reglas de correlación "
             "{dependents}",
         },
@@ -385,23 +387,26 @@ register(
         },
         "wazuh.audit.rec.description": {
             "en": "Add a description with the reason, owner, ticket and 'expires YYYY-MM-DD'.",
-            "es": "Añada una descripción con el motivo, el responsable, el ticket y 'expires AAAA-MM-DD'.",
+            "es": "Agregue una descripción con el motivo, el responsable, el ticket y 'expires AAAA-MM-DD'.",
         },
         "wazuh.audit.title.expired": {
             "en": "Suppression expired on {expires}: local rule {rule} ({file})",
-            "es": "Supresión caducada el {expires}: regla local {rule} ({file})",
+            "es": "Supresión vencida el {expires}: regla local {rule} ({file})",
         },
         "wazuh.audit.reason.expired": {
-            "en": "Its description says it expires on {expires} ({days} day(s) ago), but it is still active",
-            "es": "Su descripción indica que caduca el {expires} (hace {days} día(s)), pero sigue activa",
+            "en": "Its description says it expires on {expires} ({days} {days:plural:day|days} ago), but it "
+            "is still active",
+            "es": "Su descripción indica que vence el {expires} (hace {days} {days:plural:día|días}), pero "
+            "sigue activa",
         },
         "wazuh.audit.rec.expired": {
             "en": "Review it: remove the rule, or renew it with a fresh justification and expiry date.",
-            "es": "Revísela: elimine la regla o renuévela con una nueva justificación y fecha de caducidad.",
+            "es": "Revísela: elimine la regla o renuévela con una nueva justificación y fecha de vencimiento.",
         },
         "wazuh.audit.title.errors": {
-            "en": "Rule file {file} could not be fully analyzed ({count} problem(s))",
-            "es": "El archivo de reglas {file} no se pudo analizar por completo ({count} problema(s))",
+            "en": "Rule file {file} could not be fully analyzed ({count} {count:plural:problem|problems})",
+            "es": "El archivo de reglas {file} no se pudo analizar por completo ({count} "
+            "{count:plural:problema|problemas})",
         },
         "wazuh.audit.reason.errors_more": {
             "en": "... and {count} more",
@@ -414,8 +419,10 @@ register(
             "analysisd arranque, y la auditoría no pudo revisar las reglas afectadas.",
         },
         "wazuh.audit.title.duplicates": {
-            "en": "{count} rule id(s) in {skipped} repeat ids already defined in {kept}",
-            "es": "{count} id(s) de regla de {skipped} repiten ids ya definidos en {kept}",
+            "en": "{count} rule {count:plural:id|ids} in {skipped} {count:plural:repeats an id|repeat ids} "
+            "already defined in {kept}",
+            "es": "{count} {count:plural:id|ids} de regla de {skipped} {count:plural:repite un id ya "
+            "definido|repiten ids ya definidos} en {kept}",
         },
         "wazuh.audit.reason.duplicates": {
             "en": "Wazuh keeps the first definition and skips the later one, which never runs (ids: {ids})",
@@ -433,13 +440,14 @@ register(
             "la auditoría de ajuste",
         },
         "wazuh.audit.reason.no_stock": {
-            "en": "Only local rule files were given ({files} file(s)). The stock correlation rules (if_matched_sid, "
-            "if_matched_group and frequency rules such as the brute-force ones) live in /var/ossec/ruleset/rules, "
-            "so the audit cannot tell which local suppressions stop them from firing",
-            "es": "Solo se indicaron archivos de reglas locales ({files} archivo(s)). Las reglas de correlación de "
-            "fábrica (if_matched_sid, if_matched_group y reglas con frequency, como las de fuerza bruta) están en "
-            "/var/ossec/ruleset/rules, así que la auditoría no puede saber qué supresiones locales impiden que se "
-            "disparen",
+            "en": "Only local rule files were given ({files} {files:plural:file|files}). The stock "
+            "correlation rules (if_matched_sid, if_matched_group and frequency rules such as the "
+            "brute-force ones) live in /var/ossec/ruleset/rules, so the audit cannot tell which local "
+            "suppressions stop them from firing",
+            "es": "Solo se indicaron archivos de reglas locales ({files} {files:plural:archivo|archivos}). "
+            "Las reglas de correlación de fábrica (if_matched_sid, if_matched_group y reglas con "
+            "frequency, como las de fuerza bruta) están en /var/ossec/ruleset/rules, así que la "
+            "auditoría no puede saber qué supresiones locales impiden que se disparen",
         },
         "wazuh.audit.rec.no_stock": {
             "en": "Audit the stock and the local rules together: hushwatch audit /var/ossec/ruleset/rules "
@@ -448,9 +456,9 @@ register(
             "/var/ossec/etc/rules (el mismo par para --ruleset en report y noise).",
         },
         "wazuh.audit.reason.correlation_unverified": {
-            "en": "Its parent rule(s) {ids} are not in the loaded ruleset (the stock rules were not loaded): "
+            "en": "Its parent rules ({ids}) are not in the loaded ruleset (the stock rules were not loaded): "
             "whether they feed correlation rules, and what this suppression breaks, was not verified",
-            "es": "Su(s) regla(s) padre {ids} no están en el ruleset cargado (no se cargaron las reglas de "
+            "es": "Sus reglas padre ({ids}) no están en el ruleset cargado (no se cargaron las reglas de "
             "fábrica): no se verificó si alimentan reglas de correlación ni qué rompe esta supresión",
         },
         "wazuh.audit.action.unverified": {
@@ -459,7 +467,7 @@ register(
         },
         "wazuh.audit.title.no_rules": {
             "en": "No Wazuh rules could be parsed: the tuning audit did not run",
-            "es": "No se pudo analizar ninguna regla de Wazuh: la auditoría de tuning no se ejecutó",
+            "es": "No se pudo analizar ninguna regla de Wazuh: la auditoría del ajuste no se ejecutó",
         },
     }
 )

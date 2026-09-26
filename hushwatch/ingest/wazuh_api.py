@@ -172,25 +172,26 @@ register(
             "es": "Respuesta inesperada de la API de Wazuh para '{op}': {reason}.",
         },
         "wazuh_api.partial.failed_items": {
-            "en": "'{op}': the Wazuh API could not process {count} item(s) ({errors}); results are incomplete.",
-            "es": "'{op}': la API de Wazuh no pudo procesar {count} elemento(s) ({errors}); los resultados "
-            "están incompletos.",
+            "en": "'{op}': the Wazuh API could not process {count} {count:plural:item|items} ({errors}); "
+            "results are incomplete.",
+            "es": "'{op}': la API de Wazuh no pudo procesar {count} {count:plural:elemento|elementos} "
+            "({errors}); los resultados están incompletos.",
         },
         "wazuh_api.partial.agents_incomplete": {
             "en": "'GET /agents' returned {seen} of {total} agents; the agent inventory is incomplete.",
             "es": "'GET /agents' devolvió {seen} de {total} agentes; el inventario de agentes está incompleto.",
         },
         "wazuh_api.partial.agents_malformed": {
-            "en": "'GET /agents' returned {count} item(s) without a usable agent id; they are missing from the "
-            "agent inventory.",
-            "es": "'GET /agents' devolvió {count} elemento(s) sin un id de agente válido; faltan en el "
-            "inventario de agentes.",
+            "en": "'GET /agents' returned {count} {count:plural:item|items} without a usable agent id; they "
+            "are missing from the agent inventory.",
+            "es": "'GET /agents' devolvió {count} {count:plural:elemento|elementos} sin un id de agente "
+            "válido; faltan en el inventario de agentes.",
         },
         "wazuh_api.partial.stalled": {
-            "en": "'{op}': the Wazuh API returned the same page again (it ignored the offset); listing stopped "
-            "after {seen} item(s) and may be incomplete.",
-            "es": "'{op}': la API de Wazuh devolvió de nuevo la misma página (ignoró el offset); el listado se "
-            "detuvo tras {seen} elemento(s) y puede estar incompleto.",
+            "en": "'{op}': the Wazuh API returned the same page again (it ignored the offset); listing "
+            "stopped after {seen} {seen:plural:item|items} and may be incomplete.",
+            "es": "'{op}': la API de Wazuh devolvió de nuevo la misma página (ignoró el offset); el listado "
+            "se detuvo tras {seen} {seen:plural:elemento|elementos} y puede estar incompleto.",
         },
         "wazuh_api.partial.flagged": {
             "en": "'{op}': the Wazuh API marked the response as failed or partial (error {code}) without listing "
@@ -225,14 +226,15 @@ register(
             "status_code antes de 4.7); la petición se repitió con menos campos.",
         },
         "wazuh_api.note.stalled": {
-            "en": "'{op}': the Wazuh API returned the same page again (it ignored the offset); listing stopped "
-            "after {seen} item(s).",
-            "es": "'{op}': la API de Wazuh devolvió de nuevo la misma página (ignoró el offset); el listado se "
-            "detuvo tras {seen} elemento(s).",
+            "en": "'{op}': the Wazuh API returned the same page again (it ignored the offset); listing "
+            "stopped after {seen} {seen:plural:item|items}.",
+            "es": "'{op}': la API de Wazuh devolvió de nuevo la misma página (ignoró el offset); el listado "
+            "se detuvo tras {seen} {seen:plural:elemento|elementos}.",
         },
         "wazuh_api.note.failed_items": {
-            "en": "'{op}': {count} item(s) were not returned ({errors}).",
-            "es": "'{op}': no se devolvieron {count} elemento(s) ({errors}).",
+            "en": "'{op}': {count} {count:plural:item was|items were} not returned ({errors}).",
+            "es": "'{op}': no se {count:plural:devolvió|devolvieron} {count} "
+            "{count:plural:elemento|elementos} ({errors}).",
         },
         "wazuh_api.hint.ca": {
             "en": " (for the Wazuh API: the CA of its certificate. The default self-signed "

@@ -97,6 +97,18 @@ _ASCII_SYMBOLS = {
 _MAX_FINDINGS = 60
 
 
+def _plain(cell: object) -> str:
+    return cell.plain if isinstance(cell, Text) else cell if isinstance(cell, str) else ""
+
+
+def _longest_word(cell: object) -> int:
+    return max((len(word) for word in _plain(cell).split()), default=0)
+
+
+def _longest_line(cell: object) -> int:
+    return max((len(line) for line in _plain(cell).split("\n")), default=0)
+
+
 class _ConsoleWriter:
     def __init__(self, console: Console, ctx: RenderContext, verbose: bool) -> None:
         self.console = console
@@ -136,7 +148,41 @@ class _ConsoleWriter:
     def print(self, *renderables: RenderableType) -> None:
         """Print each renderable on its own line (rich would join several with a space)."""
         for renderable in renderables:
+            if isinstance(renderable, Table):
+                self.fit(renderable)
             self.console.print(renderable)
+
+    def fit(self, table: Table) -> None:
+        """Lay out a table that is wider than the terminal so that rich wraps between words and never cuts an
+        identifier (``Microsoft-Windows-Sysmon/Operational``, a host name, a Spanish header) in the middle.
+
+        Each column gets at least its longest word (capped at half the terminal, so one giant value still folds
+        instead of pushing the table off screen) and the remaining room is shared in proportion to how much each
+        column would still like to grow. Tables that already fit are left to rich."""
+        columns = table.columns
+        if not columns or any(column._cells == [] for column in columns):
+            return
+        cap = max(8, self.width // 2)
+        maxima: list[int] = []
+        minima: list[int] = []
+        for column in columns:
+            cells = [column.header, *column._cells]
+            longest_line = max((_longest_line(cell) for cell in cells), default=1)
+            longest_word = max((_longest_word(cell) for cell in cells), default=1)
+            maxima.append(max(1, longest_line))
+            if column.overflow == "crop":  # sparklines: happy to lose their oldest points
+                minima.append(max(1, _longest_word(column.header)))
+            else:
+                minima.append(max(1, longest_line if column.no_wrap else min(longest_word, cap)))
+        # a padding space on either side of each gap plus the box's (blank) column separator
+        room = self.width - 3 * (len(columns) - 1)
+        if sum(maxima) <= room or sum(minima) > room:
+            return  # already fits, or cannot fit whole words anyway: rich folds as a last resort
+        extra = room - sum(minima)
+        slack = [high - low for high, low in zip(maxima, minima, strict=True)]
+        total = sum(slack) or 1
+        for column, low, give in zip(columns, minima, slack, strict=True):
+            column.width = low + extra * give // total
 
     def rule(self, key: str) -> None:
         self.console.print()
@@ -189,8 +235,9 @@ class _ConsoleWriter:
             self.txt(v.tenant, "bold"),
         )
         redaction = "report.redaction.on" if v.redacted else "report.redaction.off"
+        period = f"{self.ctx.t('report.period')}: {v.period}   " if v.period else ""
         meta = self.txt(
-            f"{self.ctx.t('report.generated')}: {v.generated_at}   {self.ctx.t('report.period')}: {v.period}   "
+            f"{self.ctx.t('report.generated')}: {v.generated_at}   {period}"
             f"{self.ctx.t('report.redaction')}: {self.ctx.t(redaction)}",
             "dim",
         )
@@ -198,10 +245,11 @@ class _ConsoleWriter:
         self._basis(v)
         self._status(v)
         self._numbers(v)
-        self._noise(v)
-        self._silence(v)
-        self._coverage(v)
-        self._pipeline(v)
+        if not v.audit:  # a ruleset audit has no events: only the tuning audit applies
+            self._noise(v)
+            self._silence(v)
+            self._coverage(v)
+            self._pipeline(v)
         self._tuning(v)
         self._others(v)
         self._findings(v)
@@ -232,7 +280,8 @@ class _ConsoleWriter:
         self.rule("report.section.status")
         table = self.table(("report.col.domain", "l"), ("report.col.status", "l"), ("report.col.findings", "l"))
         for card in v.cards:
-            table.add_row(self.txt(card.label, "bold"), self.status(card.status), self.txt(card.detail))
+            detail = Text("\n").join([self.txt(card.detail), *(self.txt(note, "yellow") for note in card.notes)])
+            table.add_row(self.txt(card.label, "bold"), self.status(card.status), detail)
         self.print(table)
 
     def _numbers(self, v: ReportView) -> None:
@@ -333,6 +382,13 @@ class _ConsoleWriter:
                     self.print(Padding(self.txt(f"- {reason}", "dim"), (0, 0, 0, 4)))
         else:
             self.print(self.label("report.noise.none_investigate", "dim"))
+        if n.index_volume:
+            self.print(Text(""), self.label("report.noise.index_volume", "bold"))
+            self.print(self.label("report.noise.index_volume_hint", "dim italic"))
+            for item in n.index_volume:
+                self.print(Text.assemble(self.txt(f"{self.sym['bullet']} "), self.txt(item.title)))
+                for reason in item.reasons[: None if self.verbose else 2]:
+                    self.print(Padding(self.txt(f"- {reason}", "dim"), (0, 0, 0, 4)))
         if n.time_saved:
             self.print(
                 Text(""),
@@ -374,22 +430,28 @@ class _ConsoleWriter:
             cols: list[tuple[str, str]] = [
                 ("report.col.source", "l"),
                 ("report.col.status", "l"),
-                ("report.col.last_seen", "l"),
             ]
+            if medium:
+                cols.append(("report.col.last_seen", "l"))
+            roomy = self.width >= 150  # the level is implied by the key ("dc01 · Security"): first to go
+            if roomy:
+                cols.append(("report.col.source_level", "l"))
             if wide:
-                cols += [("report.col.source_level", "l"), ("report.col.observed", "r"), ("report.col.expected", "r")]
+                cols += [("report.col.observed", "r"), ("report.col.expected", "r")]
             if medium:
                 cols += [("report.col.tier", "l"), ("report.col.trend", "l")]
             table = self.table(*cols, title=self.label("report.silence.sources", "bold"))
             for r in s.sources:
-                last = r.last_seen + (f" ({r.silent_for})" if r.silent_for else "")
-                row: list[RenderableType] = [
-                    self.txt(r.key, "bold"),
-                    self.txt(r.status_label, _SOURCE_STYLE.get(r.status, "")),
-                    self.txt(last),
-                ]
+                status = self.txt(r.status_label, _SOURCE_STYLE.get(r.status, ""))
+                row: list[RenderableType] = [self.txt(r.key, "bold")]
+                if medium:
+                    row += [status, self.txt(r.last_seen + (f" ({r.silent_for})" if r.silent_for else ""))]
+                else:  # narrow terminal: status and relative age share a column (timestamps: HTML/Markdown)
+                    row.append(Text.assemble(status, self.txt(f" · {r.silent_for}" if r.silent_for else "")))
+                if roomy:
+                    row.append(self.txt(r.level_label))
                 if wide:
-                    row += [self.txt(r.level_label), self.txt(r.observed), self.txt(r.expected)]
+                    row += [self.txt(r.observed), self.txt(r.expected)]
                 if medium:
                     row += [self.txt(r.tier_label), self.spark(r.daily)]
                 table.add_row(*row)
@@ -408,7 +470,19 @@ class _ConsoleWriter:
             return
         if c.platforms:
             self.print(self.facts_table(c.platforms))
-        if c.expected_table is not None:
+        if c.expected_table is not None and self.width < 120:
+            # narrow terminal: one readable line per row instead of nine squeezed columns
+            self.print(self.label("report.coverage.expected", "bold"))
+            columns = c.expected_table.columns
+            for record in c.expected_table.rows:
+                head = " · ".join(record[:3])
+                rest = " · ".join(f"{label} {value}" for label, value in zip(columns[3:], record[3:], strict=False))
+                self.print(
+                    Text.assemble(self.txt(f"{self.sym['bullet']} "), self.txt(head, "bold"), self.txt(f": {rest}"))
+                )
+            if c.expected_table.more:
+                self.print(self.label("report.more_rows", "dim", n=c.expected_table.more))
+        elif c.expected_table is not None:
             table = Table(
                 box=box.SIMPLE_HEAD,
                 show_edge=False,
@@ -524,6 +598,10 @@ class _ConsoleWriter:
                     value = Text.assemble(self.spark(row.series, 30), Text("  "), self.txt(row.value, "dim"))
                 grid.add_row(self.txt(row.label), value)
             self.print(Padding(grid, indent))
+        if f.explained and self.verbose:
+            self.print(Padding(self.label("report.finding.explained", "dim"), indent))
+            for item in f.explained:
+                self.print(Padding(self.txt(f"- {item}", "dim"), (0, 0, 0, 5)))
         if f.recommendation:
             self.print(Padding(self.txt(f"{self.sym['arrow']} {f.recommendation}", "green"), indent))
         meta = f"{f.kind} {self.sym['sep']} {f.confidence_label} {self.sym['sep']} {f.fingerprint}"

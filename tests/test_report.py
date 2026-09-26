@@ -639,7 +639,7 @@ def test_incomplete_analysis_is_visually_loud() -> None:
     report = build_incomplete_report()
     md = render(report, "md")
     assert md.index("> [!CAUTION]") < md.index("## 1. Data basis")
-    assert "Caps were hit" in md and "1 partial failure(s)" in md
+    assert "Caps were hit" in md and "1 partial failure:" in md
     assert "Wazuh API unavailable" in md
     html = render(report, "html")
     assert 'class="alert bad" role="alert"' in html
@@ -666,7 +666,7 @@ def test_domain_status_cards_never_a_single_score() -> None:
 def test_key_numbers() -> None:
     md = render(build_full_report(), "md")
     assert "| Alert volume from the top 5 rules | **62%** |" in md
-    assert "| Safe tuning candidates | ✅ **2** | review required: 1 |" in md
+    assert "| Safe tuning candidates | ✅ **2** | +1 that require review |" in md
     assert "| Silent or dropped sources | ❌ **4** |" in md
     assert "| Critical sources monitorable within SLA | ⚠️ **75%** | 6 of 8 |" in md
     assert "| Coverage gaps | ⚠️ **2** |" in md
@@ -834,8 +834,8 @@ def test_console_width_aware_and_verbose() -> None:
     assert "Windows logon success" in wide
     verbose = render_console(report, width=140, verbose=True)
     terse = render_console(report, width=140, verbose=False)
-    assert "Hidden per day" in verbose and "412" in verbose
-    assert "Share of rule          84%" in verbose  # shares shown as percentages
+    assert "Demoted per day" in verbose and "412" in verbose
+    assert re.search(r"Share of rule +84%", verbose)  # shares shown as percentages
     assert "agent.name = srv-backup-01.corp.example ∧" in verbose  # conditions shown as a scope
     assert "P(no events)" in verbose and "P(no events)" not in terse
 
@@ -1013,7 +1013,13 @@ def test_number_formatting(lang: str, value: Any, expected: str) -> None:
 
 def test_percent_and_pvalue_formatting() -> None:
     en, es = RenderContext(None, "en"), RenderContext(None, "es")
-    assert en.pct(0.843) == "84%" and en.pct(0.004) == "<1%" and en.pct(0.999) == ">99%" and en.pct(None) == "—"
+    assert (
+        en.pct(0.843) == "84%"
+        and en.pct(0.004) == "0.4%"
+        and en.pct(0.000004) == "<0.1%"
+        and en.pct(0.999) == ">99%"
+        and en.pct(None) == "—"
+    )
     assert en.pct(84.3) == "84%"
     assert en.pvalue(0.00001) == "<0.0001" and es.pvalue(0.0123) == "0,012" and en.pvalue(0.004) == "0.0040"
     assert en.dt(NOW) == "2026-09-25 10:00 UTC" and en.dt("2026-09-25T10:00:00Z") == "2026-09-25 10:00 UTC"
@@ -1115,7 +1121,7 @@ def test_real_analyzer_section_shapes() -> None:
     report.sections["silence"]["sources"][0]["status"] = "not_evaluated"
     md = render(report, "md")
     assert "| 150 | 34% |" in md  # backtest numbers win over the pre-backtest estimate (34.12%)
-    assert "Backtest › Hidden per day: 150" in md and "Safety gates › Novelty: yes" in md
+    assert "Backtest › Demoted per day: 150" in md and "Safety gates › Novelty: ✓ passed" in md
     assert "| Basis | Name | Log source | Matched | Present | Missing |" in md
     assert "dc01.corp.example (Critical)" in md and "246 more not shown" in md
     assert "Input completeness" in md and "Events: 10" in md and "Not evaluated" in md
@@ -1126,7 +1132,7 @@ def test_real_analyzer_section_shapes() -> None:
     assert "Expected sources</caption>" in html
 
 
-# ---- regressions (review) ---------------------------------------------------------------------------------------
+# ---- regressions ---------------------------------------------------------------------------------------
 
 
 def _outputs_redacted(report: Report, redactor: Redactor) -> dict[str, str]:
@@ -1275,7 +1281,7 @@ def test_console_without_verbose_shows_the_most_severe_findings_of_the_whole_rep
     ]
     out = render_console(_small_report(findings), width=140)
     assert "Audit log cleared on dc02 before silence" in out
-    assert "Noise (80)" in out and "21 more finding(s) not shown" in out
+    assert "Noise (80)" in out and "21 more findings are not shown" in out
 
 
 def test_markdown_data_cannot_open_blocks_or_mention_people() -> None:
@@ -1340,7 +1346,7 @@ def test_odd_values_format_safely() -> None:
     finding = _f("pipeline.lag", Severity.LOW, "s", "t", evidence={"beacons": [], "huge": 10**5000})
     doc = json.loads(render(_small_report([finding]), "json"))
     assert doc["findings"][0]["evidence"] == {"beacons": [], "huge": None}
-    assert "Beacons: —" in render(_small_report([finding]), "md")
+    assert "Beacon-like destinations: —" in render(_small_report([finding]), "md")
 
 
 def test_five_thousand_findings_render_in_bounded_time() -> None:

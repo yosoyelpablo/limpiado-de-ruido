@@ -1,7 +1,6 @@
-"""Regression tests for the system-review fixes in the noise engine and the Wazuh ruleset/emitter/audit.
+"""Regression tests for the noise engine and the Wazuh ruleset/emitter/audit.
 
-Each test names the review finding it pins (B3, M1..M6, m1, m4, m8..m10, im2, sm4, IB2). Synthetic data only
-(RFC 5737 / RFC 1918 addresses, *.example hosts).
+Synthetic data only (RFC 5737 / RFC 1918 addresses, *.example hosts).
 """
 
 from __future__ import annotations
@@ -79,8 +78,8 @@ def emit(tmp_path: Path, suggestions: list[Suggestion], ruleset: Ruleset | None,
     return emit_suppressions(suggestions, **params)
 
 
-# ---- B3: a ruleset without stock rules cannot verify correlation -----------------------------------------------------
-def test_b3_local_only_ruleset_marks_dependents_unverified() -> None:
+# ---- a ruleset without stock rules cannot verify correlation -----------------------------------------------------
+def test_local_only_ruleset_marks_dependents_unverified() -> None:
     local_only = load_ruleset([LOCAL])
     assert local_only.rules and not local_only.has_stock
     deps = local_only.dependents("5710")
@@ -90,7 +89,7 @@ def test_b3_local_only_ruleset_marks_dependents_unverified() -> None:
     assert full.dependents("5710") == ("5712", "60204")  # still a plain tuple of ids
 
 
-def test_b3_noise_requires_review_when_correlation_is_not_verified() -> None:
+def test_noise_requires_review_when_correlation_is_not_verified() -> None:
     events = service_automation() + human_background(TASK)
     local_only = load_ruleset([LOCAL])
     result = run(events, dependents=local_only.dependents)
@@ -114,7 +113,7 @@ def test_b3_noise_requires_review_when_correlation_is_not_verified() -> None:
     assert all(s.dependents_verified for s in generic)
 
 
-def test_b3_report_and_xml_agree_on_review(tmp_path: Path) -> None:
+def test_report_and_xml_agree_on_review(tmp_path: Path) -> None:
     local_only = load_ruleset([LOCAL])
     events = service_automation() + human_background(TASK)
     tuned = tune(run(events, dependents=local_only.dependents))
@@ -131,7 +130,7 @@ def test_b3_report_and_xml_agree_on_review(tmp_path: Path) -> None:
     assert tuned[0].review_required
 
 
-def test_b3_audit_reports_missing_stock_rules() -> None:
+def test_audit_reports_missing_stock_rules() -> None:
     result = audit_ruleset(load_ruleset([LOCAL]), tenant=TenantConfig(), now=NOW)
     gap = [f for f in result.findings if f.subject == "ruleset:no-stock"]
     assert len(gap) == 1 and gap[0].kind == "assessment.incomplete" and gap[0].severity is Severity.MEDIUM
@@ -146,8 +145,8 @@ def test_b3_audit_reports_missing_stock_rules() -> None:
     assert full.section["stock_rules_loaded"] is True
 
 
-# ---- M1 / FM1 / FM13: nothing to gain -> never "tune"; index volume apart --------------------------------------------
-def test_m1_nothing_to_gain_is_index_volume_not_tune() -> None:
+# ---- nothing to gain -> never "tune"; index volume apart --------------------------------------------
+def test_nothing_to_gain_is_index_volume_not_tune() -> None:
     low = Rule("100700", 3, ("local", "scheduled_task"), description="Scheduled task (low)")
     below_triage = Rule("100701", 5, ("local", "scheduled_task"), description="Scheduled task (medium)")
     tenant = TenantConfig(trusted_entities={"user": ["svc_backup"]}, triage_level=7)
@@ -170,14 +169,14 @@ def test_m1_nothing_to_gain_is_index_volume_not_tune() -> None:
         assert row["verdict"] == "watch"
 
 
-def test_m1_backtest_texts_say_demote_not_hide() -> None:
+def test_backtest_texts_say_demote_not_hide() -> None:
     result = run(service_automation() + human_background(TASK))
     reasons = [text(r) for s in tune(result) for r in s.reasons]
     assert any(r.startswith("Backtest: would demote") for r in reasons)
     assert not any("would hide" in r for r in reasons)
 
 
-def test_m1_emitter_skips_children_that_do_not_lower_the_level(tmp_path: Path) -> None:
+def test_emitter_skips_children_that_do_not_lower_the_level(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     result = emit(tmp_path, [sug("60106", ("agent.name", "dc01"))], rs)  # 60106 is level 3
     assert result.rules == [] and result.paths == []
@@ -185,7 +184,7 @@ def test_m1_emitter_skips_children_that_do_not_lower_the_level(tmp_path: Path) -
     assert not any(w.key == "wazuh.emit.skip.not_lower" for w in result.warnings)
 
 
-def test_m1_index_volume_is_explained_in_validation_never_written(tmp_path: Path) -> None:
+def test_index_volume_is_explained_in_validation_never_written(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     volume = sug("60106", ("agent.name", "dc01"), verdict="watch", impact="index_volume", fingerprint="vol0001")
     real = sug("5503", ("agent.name", "srv-app-01.example"), fingerprint="tune0001")
@@ -200,8 +199,8 @@ def test_m1_index_volume_is_explained_in_validation_never_written(tmp_path: Path
     assert "vol0001" not in result.paths[0].read_text(encoding="utf-8")
 
 
-# ---- M2: skipped suggestions are not warnings ------------------------------------------------------------------------
-def test_m2_skipped_are_kept_apart_from_warnings(tmp_path: Path) -> None:
+# ---- skipped suggestions are not warnings ------------------------------------------------------------------------
+def test_skipped_are_kept_apart_from_warnings(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     bad = sug("5503", ("agent.name", "a"), ("predecoder.hostname", "b"), fingerprint="skipme")
     good = sug("5503", ("agent.name", "srv-app-01.example"), fingerprint="keepme")
@@ -212,8 +211,8 @@ def test_m2_skipped_are_kept_apart_from_warnings(tmp_path: Path) -> None:
     assert "Suggestions not written as rules" in validation and "skipme" in validation
 
 
-# ---- M3: audit advice for rules that feed correlation ----------------------------------------------------------------
-def test_m3_audit_never_recommends_a_child_that_keeps_groups() -> None:
+# ---- audit advice for rules that feed correlation ----------------------------------------------------------------
+def test_audit_never_recommends_a_child_that_keeps_groups() -> None:
     result = audit_ruleset(load_ruleset([FIXTURES]), tenant=TenantConfig(), now=NOW)
     correlation = [
         f
@@ -228,7 +227,7 @@ def test_m3_audit_never_recommends_a_child_that_keeps_groups() -> None:
     assert "ANY child" in text(correlation[0].recommendation)
 
 
-# ---- M4: exposure names public sources, never the anchor; firewall drops aggregate; FIM per rule ---------------------
+# ---- exposure names public sources, never the anchor; firewall drops aggregate; FIM per rule ---------------------
 def test_m4a_firewall_drops_aggregate_and_never_block_the_sender() -> None:
     rng = random.Random(3)
     drops = [
@@ -310,8 +309,8 @@ def test_m4b_sregex_is_only_proposed_for_a_common_directory_and_extension() -> N
     assert _sregex_for(["/srv/(x)/a.log", "/srv/(x)/b.log"]) == "^/srv/\\(x\\)/\\S+.log$"  # OS_Regex escapes
 
 
-# ---- M5: true positives are attacks, not noise -----------------------------------------------------------------------
-def test_m5_true_positive_scope_is_high_and_framed_as_an_attack() -> None:
+# ---- true positives are attacks, not noise -----------------------------------------------------------------------
+def test_true_positive_scope_is_high_and_framed_as_an_attack() -> None:
     events = service_automation() + human_background(TASK)
     one = next(e for e in events if e.fields["agent.name"] == "srv-backup-01.corp.example")
     disp = Dispositions.from_rows([{"alert_id": one.event_id, "verdict": "tp", "closed_at": "2026-09-10"}])
@@ -323,11 +322,11 @@ def test_m5_true_positive_scope_is_high_and_framed_as_an_attack() -> None:
     assert "fixing its cause" not in text(finding.recommendation)
     assert keys(finding)[0] == "noise.reason.tp"  # the most important reason first
     row = next(r for r in result.section["rules"] if r["rule_id"] == "100200")
-    assert row["verdict"] == "do_not_tune"  # m10: the rules table agrees with the finding
+    assert row["verdict"] == "do_not_tune"  # the rules table agrees with the finding
 
 
-# ---- M6: noisy threshold, wording, dominant external entity, beacons vs sprays ---------------------------------------
-def test_m6_rules_below_the_noisy_threshold_are_not_called_noisy() -> None:
+# ---- noisy threshold, wording, dominant external entity, beacons vs sprays ---------------------------------------
+def test_rules_below_the_noisy_threshold_are_not_called_noisy() -> None:
     critical = Rule("63103", 12, ("windows", "log_cleared"), description="The audit log was cleared.")
     events = [alert(critical, START + timedelta(days=d), "dc01.example") for d in range(0, 21, 5)]
     events += service_automation()
@@ -338,7 +337,7 @@ def test_m6_rules_below_the_noisy_threshold_are_not_called_noisy() -> None:
     assert result.section["noisy_threshold"] == {"alerts": 50, "per_day": 5.0}
 
 
-def test_m6_high_level_rule_wording() -> None:
+def test_high_level_rule_wording() -> None:
     critical = Rule("62123", 12, ("windows", "windows_defender"), description="Defender: PUA")
     noisy = [alert(critical, t, "ws-03.example") for t in every(START, END, timedelta(minutes=20), seed=16)]
     result = run(noisy)
@@ -347,7 +346,7 @@ def test_m6_high_level_rule_wording() -> None:
     assert "is noisy, but" not in text(finding.title)
 
 
-def test_m6_brute_force_finding_names_the_attacking_address() -> None:
+def test_brute_force_finding_names_the_attacking_address() -> None:
     background = [
         alert(SSHD_INVALID, t, "srv-web-02.example", data={"srcip": f"10.0.{i % 5}.7", "srcuser": "admin"})
         for i, t in enumerate(every(START, END, timedelta(minutes=30), seed=31))
@@ -368,7 +367,7 @@ def test_m6_brute_force_finding_names_the_attacking_address() -> None:
     assert finding.evidence["public_sources"][0]["entity"] == Entity("ip", "203.0.113.50")
 
 
-def test_m6_beacon_names_the_destination_not_the_host_address() -> None:
+def test_beacon_names_the_destination_not_the_host_address() -> None:
     net = Rule("100310", 8, ("sysmon", "sysmon_event3"), description="Network connection")
     beacon = [
         alert(
@@ -389,7 +388,7 @@ def test_m6_beacon_names_the_destination_not_the_host_address() -> None:
     assert keys(finding)[0] in ("noise.reason.beacon", "noise.backtest.beacon")
 
 
-def test_m6_password_spray_is_not_called_beaconing() -> None:
+def test_password_spray_is_not_called_beaconing() -> None:
     logon_fail = Rule(
         "60122", 5, ("windows", "authentication_failed"), ("Credential Access",), ("T1110",), "Logon failure"
     )
@@ -422,7 +421,7 @@ def test_m6_password_spray_is_not_called_beaconing() -> None:
     assert "beacon" not in rendered
 
 
-def test_m6_regularity_separates_beacons_from_sprays() -> None:
+def test_regularity_separates_beacons_from_sprays() -> None:
     rng = random.Random(1)
     sketch: SpaceSaving[str] = SpaceSaving(4)
     ts = 1_000_000.0
@@ -442,8 +441,8 @@ def test_m6_regularity_separates_beacons_from_sprays() -> None:
     assert few.entries()[0].regularity() is None  # too few gaps: unknown, never "periodic"
 
 
-# ---- m1: one day count for per-day figures ---------------------------------------------------------------------------
-def test_m1_minor_per_day_uses_elapsed_days() -> None:
+# ---- one day count for per-day figures ---------------------------------------------------------------------------
+def test_minor_per_day_uses_elapsed_days() -> None:
     result = run(service_automation() + human_background(TASK))
     section = result.section
     days = section["totals"]["days"]
@@ -452,8 +451,8 @@ def test_m1_minor_per_day_uses_elapsed_days() -> None:
     assert row["per_day"] == pytest.approx(row["total"] / days, rel=0.01)
 
 
-# ---- m4: the child keeps the parent's output options, MITRE and compliance groups ------------------------------------
-def test_m4_child_copies_options_and_mitre(tmp_path: Path) -> None:
+# ---- the child keeps the parent's output options, MITRE and compliance groups ------------------------------------
+def test_child_copies_options_and_mitre(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     result = emit(tmp_path, [sug("60122", ("agent.name", "dc01"))], rs)
     xml = result.paths[0].read_text(encoding="utf-8")
@@ -462,7 +461,7 @@ def test_m4_child_copies_options_and_mitre(tmp_path: Path) -> None:
     assert spec["suppressions"][0]["options"] == ["no_full_log"] and spec["suppressions"][0]["mitre"] == ["T1110"]
 
 
-def test_m4_compliance_groups_are_rebuilt_from_alerts_without_a_ruleset(tmp_path: Path) -> None:
+def test_compliance_groups_are_rebuilt_from_alerts_without_a_ruleset(tmp_path: Path) -> None:
     extra = {"rule.pci_dss": ["10.2.4", "10.2.5"], "rule.gdpr": ["IV_35.7.d"], "rule.nist_800_53": ["AU.14"]}
     events = [
         alert(
@@ -484,8 +483,8 @@ def test_m4_compliance_groups_are_rebuilt_from_alerts_without_a_ruleset(tmp_path
     assert "pci_dss_10.2.4," in xml and "gdpr_IV_35.7.d," in xml
 
 
-# ---- m9: Wazuh has no rule expiry ------------------------------------------------------------------------------------
-def test_m9_expiry_is_explained(tmp_path: Path) -> None:
+# ---- Wazuh has no rule expiry ------------------------------------------------------------------------------------
+def test_expiry_is_explained(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     emit(tmp_path, [sug("5503", ("agent.name", "srv-app-01.example"))], rs)
     validation = (tmp_path / "out" / VALIDATION_FILE).read_text(encoding="utf-8")
@@ -497,16 +496,16 @@ def test_m9_expiry_is_explained(tmp_path: Path) -> None:
     assert "never expire by themselves" in advice and "hushwatch audit" in advice
 
 
-# ---- m10: the rules table agrees with the findings -------------------------------------------------------------------
-def test_m10_rules_table_marks_scoped_verdicts() -> None:
+# ---- the rules table agrees with the findings -------------------------------------------------------------------
+def test_rules_table_marks_scoped_verdicts() -> None:
     result = run(service_automation() + human_background(TASK))
     row = next(r for r in result.section["rules"] if r["rule_id"] == "100200")
     assert row["verdict"] == "tune" and row["verdict_scoped"] is True
     assert row["verdict_counts"].get("tune") == 1
 
 
-# ---- im2: one fingerprint across finding, rule and spec --------------------------------------------------------------
-def test_im2_one_fingerprint_for_finding_rule_and_spec(tmp_path: Path) -> None:
+# ---- one fingerprint across finding, rule and spec --------------------------------------------------------------
+def test_one_fingerprint_for_finding_rule_and_spec(tmp_path: Path) -> None:
     result = run(service_automation() + human_background(TASK))
     suggestion = tune(result)[0]
     finding = finding_for(result, suggestion)
@@ -524,8 +523,8 @@ def test_im2_one_fingerprint_for_finding_rule_and_spec(tmp_path: Path) -> None:
     assert spec["suppressions"][0]["fingerprint"] == finding.fingerprint
 
 
-# ---- sm4: the "already exists" error names the real CLI flag ---------------------------------------------------------
-def test_sm4_existing_files_mention_force(tmp_path: Path) -> None:
+# ---- the "already exists" error names the real CLI flag ---------------------------------------------------------
+def test_existing_files_mention_force(tmp_path: Path) -> None:
     rs = load_ruleset([STOCK, LOCAL])
     emit(tmp_path, [sug("5503", ("agent.name", "srv-app-01.example"))], rs)
     with pytest.raises(EmitError) as excinfo:
@@ -534,7 +533,7 @@ def test_sm4_existing_files_mention_force(tmp_path: Path) -> None:
     assert "--force" in text(excinfo.value.message, "es")
 
 
-# ---- IB2: a remote failure during the backtest never crashes and never tunes -----------------------------------------
+# ---- a remote failure during the backtest never crashes and never tunes -----------------------------------------
 class _LostPit:
     """A re-iterable source whose second pass fails like an indexer that lost its point-in-time."""
 
@@ -549,7 +548,7 @@ class _LostPit:
         return iter(self.events)
 
 
-def test_ib2_remote_error_in_the_backtest_is_not_backtested() -> None:
+def test_remote_error_in_the_backtest_is_not_backtested() -> None:
     events = sorted(service_automation() + human_background(TASK), key=lambda e: e.ts)
     source = _LostPit(events)
     collector = NoiseCollector(TENANT, "wazuh4")
@@ -564,8 +563,8 @@ def test_ib2_remote_error_in_the_backtest_is_not_backtested() -> None:
     assert any("point in time expired" in text(r) for r in incomplete[0].reasons)
 
 
-# ---- m8: wording glitches --------------------------------------------------------------------------------------------
-def test_m8_counts_rates_and_shares_read_correctly() -> None:
+# ---- wording glitches --------------------------------------------------------------------------------------------
+def test_counts_rates_and_shares_read_correctly() -> None:
     from hushwatch.analysis.backtest import pct, rate
     from hushwatch.analysis.noise import _alerts
 
@@ -574,7 +573,7 @@ def test_m8_counts_rates_and_shares_read_correctly() -> None:
     assert text(pct(0.00001)) == "<0.1%" and text(pct(0.004)) == "0.4%" and text(pct(0.5)) == "50%"
 
 
-def test_m8_external_share_and_missing_evidence_wording() -> None:
+def test_external_share_and_missing_evidence_wording() -> None:
     facts_all = g.CandidateFacts(
         rule_id="1",
         conditions=(),
@@ -593,7 +592,7 @@ def test_m8_external_share_and_missing_evidence_wording() -> None:
     assert gap is not None and "only 0 triaged" in text(gap) and "FP ≥ 0%" not in text(gap)
 
 
-def test_m8_named_service_account_is_not_called_trusted() -> None:
+def test_named_service_account_is_not_called_trusted() -> None:
     task = Rule("100450", 8, ("local", "scheduled_task"), ("Persistence",), ("T1053",), "Scheduled task created")
     events = [
         alert(task, t, "db-01.example", win={"subjectUserName": "svc_sql"})

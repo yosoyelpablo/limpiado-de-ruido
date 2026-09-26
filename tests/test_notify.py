@@ -30,9 +30,9 @@ from hushwatch.state import RunOutcome, StateStore, Transition
 UTC = timezone.utc
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 TENANT = "acme"
-SLACK_SECRET = "XXXXXXXXXXXXXXXXXXXXXXXX"
-SLACK_URL = f"https://hooks.slack.com/services/T00000000/B00000000/{SLACK_SECRET}"
-HOOK_URL = "https://hooks.example.com/hushwatch/9f8e7d6c5b4a?token=s3cr3tT0ken"
+SLACK_SECRET = "FAKE-webhook-path"
+SLACK_URL = f"https://hooks.slack.example/services/FAKE/FAKE/{SLACK_SECRET}"
+HOOK_URL = "https://hooks.example.com/hushwatch/9f8e7d6c5b4a?token=FAKE-test-token"
 RAW_VALUES = ("srv-web-01.example", "198.51.100.23", "alice", "dc01.corp.example", "203.0.113.9")
 
 register(
@@ -529,8 +529,11 @@ def test_redirects_are_not_followed() -> None:
         (NotifyConfig(type="webhook", url=""), "no URL configured"),
         (NotifyConfig(type="webhook", url="ftp://files.example/drop"), "invalid or does not use http(s)"),
         (NotifyConfig(type="webhook", url="file:///etc/passwd"), "invalid or does not use http(s)"),
-        (NotifyConfig(type="webhook", url="hooks.example.com/no-scheme/s3cr3tT0ken"), "invalid"),
-        (NotifyConfig(type="slack", url="http://hooks.slack.com/services/T0/B0/" + SLACK_SECRET), "must use https"),
+        (NotifyConfig(type="webhook", url="hooks.example.com/no-scheme/FAKE-test-token"), "invalid"),
+        (
+            NotifyConfig(type="slack", url="http://hooks.slack.example/services/FAKE/FAKE/" + SLACK_SECRET),
+            "must use https",
+        ),
         (NotifyConfig(type="teams", url=HOOK_URL), "unknown notification type"),
         (NotifyConfig(type="webhook", url=HOOK_URL, headers={"X-Bad": "v\r\nX-Injected: 1"}), "custom header 'X-Bad'"),
         (NotifyConfig(type="webhook", url=HOOK_URL, headers={"Bad Name": "v"}), "custom header"),
@@ -614,7 +617,7 @@ def test_heartbeat_to_webhook_every_run() -> None:
         TENANT,
         now=T0,
         ok=False,
-        detail="indexer https://svc:hunter2pass@198.51.100.7:9200/_search failed",
+        detail="indexer https://svc:FAKE-test-password-1@198.51.100.7:9200/_search failed",
         run_id="r1",
         counts={"open": 3},
         transport=rec.transport,
@@ -623,7 +626,7 @@ def test_heartbeat_to_webhook_every_run() -> None:
     body = rec.body()
     assert body["type"] == "heartbeat" and body["ok"] is False and body["status"] == "fail"
     assert body["tenant"] == TENANT and body["at"] == "2026-09-01T12:00:00Z" and body["counts"] == {"open": 3}
-    assert "hunter2pass" not in body["detail"] and "198.51.100.7" not in body["detail"]
+    assert "FAKE-test-password-1" not in body["detail"] and "198.51.100.7" not in body["detail"]
     assert body["summary"] == "hushwatch · acme: run FAILED or incomplete (2026-09-01T12:00:00Z)"
     assert send_heartbeat(webhook(), TENANT, now=T0, ok=True, transport=rec.transport).sent
 
@@ -658,24 +661,24 @@ def test_heartbeat_detail_never_carries_url_credentials(include: bool, with_reda
 def test_titles_never_carry_url_credentials() -> None:
     finding = Finding(
         kind="noise.investigate", domain="noise", severity=Severity.HIGH, subject="x", tenant=TENANT,
-        title=M("test.notify.hostile", user="https://bob:hunter2pw@203.0.113.9/x?sig=S1GN4TURE"),
+        title=M("test.notify.hostile", user="https://bob:FAKE-test-password-2@203.0.113.9/x?sig=FAKE-signature"),
     )  # fmt: skip
     for include in (True, False):
         payload = build_payload(TENANT, outcome_of(transition(finding)), by_fp(finding), include_entities=include)
         title = payload["transitions"][0]["title"]
-        assert "hunter2pw" not in title and "bob:" not in title, title
-        assert ("S1GN4TURE" in title) is include  # opted in: the URL itself is data, only credentials go
+        assert "FAKE-test-password-2" not in title and "bob:" not in title, title
+        assert ("FAKE-signature" in title) is include  # opted in: the URL itself is data, only credentials go
 
 
 def test_url_entities_lose_their_credentials_even_with_include_entities() -> None:
     finding = Finding(
         kind="noise.investigate", domain="noise", severity=Severity.HIGH, tenant=TENANT,
-        subject="url:https://bob:hunter2pw@203.0.113.9/login",
-        title=M("test.notify.hostile", user=Entity("url", "https://bob:hunter2pw@203.0.113.9/login")),
+        subject="url:https://bob:FAKE-test-password-2@203.0.113.9/login",
+        title=M("test.notify.hostile", user=Entity("url", "https://bob:FAKE-test-password-2@203.0.113.9/login")),
     )  # fmt: skip
     payload = build_payload(TENANT, outcome_of(transition(finding)), by_fp(finding), include_entities=True)
     text = json.dumps(payload)
-    assert "hunter2pw" not in text and "https://203.0.113.9/login" in text
+    assert "FAKE-test-password-2" not in text and "https://203.0.113.9/login" in text
 
 
 def test_unwrapped_value_known_from_evidence_is_masked_without_redactor() -> None:

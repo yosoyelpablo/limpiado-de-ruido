@@ -420,7 +420,8 @@ def test_every_noise_message_has_spanish() -> None:
     assert missing == []
     for key in noise_keys:
         if key.startswith("noise."):
-            assert i18n._CATALOG[key]["es"].count("{") == i18n._CATALOG[key]["en"].count("{"), key
+            placeholders = {lang: set(re.findall(r"\{(\w+)", i18n._CATALOG[key][lang])) for lang in ("en", "es")}
+            assert placeholders["es"] == placeholders["en"], key
 
 
 def test_reason_messages_carry_numbers(tenant: TenantConfig) -> None:
@@ -445,7 +446,7 @@ def test_ip_classifier_agrees_with_tenant(value: str) -> None:
     assert classifier.kind(value) == g.ip_kind(value, tenant)  # cached
 
 
-# ---- adversarial classification (review) -------------------------------------------------------------------------
+# ---- adversarial classification -------------------------------------------------------------------------
 def test_machine_accounts_are_never_trusted_even_with_a_star_dollar_pattern() -> None:
     tenant = TenantConfig()
     assert "*$" not in tenant.noise.service_account_patterns  # no longer shipped by default

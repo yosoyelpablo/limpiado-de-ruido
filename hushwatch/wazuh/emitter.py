@@ -122,8 +122,8 @@ register(
             "es": "Rango de ids de regla no válido {low}-{high}",
         },
         "wazuh.emit.err.exhausted": {
-            "en": "The rule id range {low}-{high} has no free id left for {count} rule(s)",
-            "es": "El rango de ids {low}-{high} no tiene ids libres para {count} regla(s)",
+            "en": "The rule id range {low}-{high} has no free id left for {count} {count:plural:rule|rules}",
+            "es": "El rango de ids {low}-{high} no tiene ids libres para {count} {count:plural:regla|reglas}",
         },
         "wazuh.emit.err.collision": {
             "en": "Generated rule id {rule} collides with an existing or duplicated rule id; nothing was written",
@@ -162,7 +162,8 @@ register(
         },
         "wazuh.emit.skip.expires": {
             "en": "Suggestion {fingerprint} (rule {rule}) skipped: it has no valid expiry date or already expired",
-            "es": "Sugerencia {fingerprint} (regla {rule}) omitida: no tiene fecha de caducidad válida o ya caducó",
+            "es": "Sugerencia {fingerprint} (regla {rule}) omitida: no tiene una fecha de vencimiento válida "
+            "o ya venció",
         },
         "wazuh.emit.skip.rule_wide": {
             "en": "Suggestion {fingerprint} (rule {rule}) skipped: it has no condition and would demote the whole "
@@ -264,9 +265,10 @@ register(
             "correlación; todas las reglas quedan marcadas como REVISIÓN OBLIGATORIA",
         },
         "wazuh.emit.warn.ruleset_errors": {
-            "en": "The ruleset had {count} load error(s): correlation dependents and used ids may be incomplete",
-            "es": "El ruleset tuvo {count} error(es) de carga: las dependencias de correlación y los ids usados "
-            "pueden estar incompletos",
+            "en": "The ruleset had {count} load {count:plural:error|errors}: correlation dependents and used "
+            "ids may be incomplete",
+            "es": "El ruleset tuvo {count} {count:plural:error|errores} de carga: las dependencias de "
+            "correlación y los ids usados pueden estar incompletos",
         },
         "wazuh.emit.warn.no_stock": {
             "en": "Only local rules were loaded (no stock ruleset): correlation rules that depend on the parents "
@@ -298,12 +300,13 @@ register(
             "del manager (agente 000), cuya ubicación no lleva el prefijo '(agente)'",
         },
         "wazuh.emit.warn.hostname_agent": {
-            "en": "Suggestion {fingerprint}: some examples come from agents, where Wazuh's <hostname> holds the "
-            "agent name instead of predecoder.hostname; the rule only covers events the manager receives itself "
-            "(syslog, agent 000), so it hides fewer events than the backtest counted",
-            "es": "Sugerencia {fingerprint}: algunos ejemplos proceden de agentes, donde el <hostname> de Wazuh "
-            "contiene el nombre del agente en lugar de predecoder.hostname; la regla solo cubre eventos que recibe "
-            "el propio manager (syslog, agente 000), así que oculta menos eventos de los que contó el backtest",
+            "en": "Suggestion {fingerprint}: some examples come from agents, where Wazuh's <hostname> holds "
+            "the agent name instead of predecoder.hostname; the rule only covers events the manager "
+            "receives itself (syslog, agent 000), so it hides fewer events than the backtest counted",
+            "es": "Sugerencia {fingerprint}: algunos ejemplos proceden de agentes, donde el <hostname> de "
+            "Wazuh contiene el nombre del agente en lugar de predecoder.hostname; la regla solo cubre "
+            "eventos que recibe el propio manager (syslog, agente 000), así que degrada menos eventos "
+            "de los que contó el backtest",
         },
         "wazuh.emit.warn.parent_after": {
             "en": "Parent rule {rule} is defined in {file}, which analysisd loads after {output} (files load in "
@@ -394,14 +397,15 @@ register(
             "id de regla de hushwatch (id duplicado, padre 'not found') significa que esa regla se descartó:",
         },
         "wazuh.validation.step_logtest": {
-            "en": "Replay the lines of {samples} with wazuh-logtest: each must now end in the hushwatch rule at "
-            "level {level}. Replay a line from another host or user too: it must keep its original rule. Rules "
-            "see the location as '(agent) ip->path', so for agent- or file-scoped rules pass an agent-style "
-            "location to logtest:",
-            "es": "Reproduzca las líneas de {samples} con wazuh-logtest: cada una debe terminar ahora en la regla "
-            "de hushwatch con nivel {level}. Reproduzca también una línea de otro host o usuario: debe mantener su "
-            "regla original. Las reglas ven la ubicación como '(agente) ip->ruta', así que para reglas filtradas "
-            "por agente o archivo indique a logtest una ubicación de estilo agente:",
+            "en": "Replay the lines of {samples} with wazuh-logtest: each must now end in the hushwatch rule "
+            "at level {level}. Replay a line from another host or user too: it must keep its original "
+            "rule. Rules see the location as '(agent) ip->path', so for agent- or file-scoped rules "
+            "pass an agent-style location to logtest:",
+            "es": "Reproduzca las líneas de {samples} con wazuh-logtest: cada una debe terminar ahora en la "
+            "regla de hushwatch con nivel {level}. Reproduzca también una línea de otro equipo o "
+            "usuario: debe mantener su regla original. Las reglas ven la ubicación como '(agente) "
+            "ip->ruta', así que para reglas filtradas por agente o archivo indique a logtest una "
+            "ubicación de estilo agente:",
         },
         "wazuh.validation.step_restart": {
             "en": "Restart the manager and confirm that it is running:",
@@ -420,10 +424,10 @@ register(
         },
         "wazuh.validation.rules_heading": {"en": "Rules in this file", "es": "Reglas de este archivo"},
         "wazuh.validation.rule_line": {
-            "en": "Rule {rule} demotes rule {parent} to level {level} for {fields} (fingerprint {fingerprint}, "
-            "expires {expires}; logtest samples: {samples})",
-            "es": "La regla {rule} degrada la regla {parent} a nivel {level} para {fields} (huella {fingerprint}, "
-            "caduca el {expires}; muestras para logtest: {samples})",
+            "en": "Rule {rule} demotes rule {parent} to level {level} for {fields} (fingerprint "
+            "{fingerprint}, expires {expires}; logtest samples: {samples})",
+            "es": "La regla {rule} degrada la regla {parent} a nivel {level} para {fields} (huella "
+            "{fingerprint}, vence el {expires}; muestras para logtest: {samples})",
         },
         "wazuh.validation.samples_lines": {"en": "lines {first}-{last}", "es": "líneas {first}-{last}"},
         "wazuh.validation.samples_line": {"en": "line {line}", "es": "línea {line}"},
@@ -437,10 +441,10 @@ register(
             "es": "REVISIÓN OBLIGATORIA antes de desplegar.",
         },
         "wazuh.validation.dependent_broken": {
-            "en": "Correlation rule {rule} ({via}) will NOT count the demoted events: prove it still detects an "
-            "attack from this scope, or drop the suggestion.",
-            "es": "La regla de correlación {rule} ({via}) NO contará los eventos degradados: demuestre que sigue "
-            "detectando un ataque desde este ámbito o descarte la sugerencia.",
+            "en": "Correlation rule {rule} ({via}) will NOT count the demoted events: prove it still detects "
+            "an attack from this scope, or drop the suggestion.",
+            "es": "La regla de correlación {rule} ({via}) NO contará los eventos degradados: demuestre que "
+            "sigue detectando un ataque desde este alcance o descarte la sugerencia.",
         },
         "wazuh.validation.dependent_kept": {
             "en": "Correlation rule {rule} ({via}) should keep counting the demoted events; verify it in a test.",
@@ -448,18 +452,18 @@ register(
             "verifíquelo con una prueba.",
         },
         "wazuh.validation.preempted": {
-            "en": "Rule {rule} (level {level}) is reached through a sibling that analysisd tries AFTER the hushwatch "
-            "rule: for these events it will no longer fire. Prove it cannot detect an attack from this scope, or "
-            "drop the suggestion.",
-            "es": "La regla {rule} (nivel {level}) se alcanza a través de una regla hermana que analysisd evalúa "
-            "DESPUÉS de la regla de hushwatch: para estos eventos dejará de dispararse. Demuestre que no puede "
-            "detectar un ataque desde este ámbito o descarte la sugerencia.",
+            "en": "Rule {rule} (level {level}) is reached through a sibling that analysisd tries AFTER the "
+            "hushwatch rule: for these events it will no longer fire. Prove it cannot detect an attack "
+            "from this scope, or drop the suggestion.",
+            "es": "La regla {rule} (nivel {level}) se alcanza a través de una regla hermana que analysisd "
+            "evalúa DESPUÉS de la regla de hushwatch: para estos eventos dejará de dispararse. "
+            "Demuestre que no puede detectar un ataque desde este alcance o descarte la sugerencia.",
         },
         "wazuh.validation.parent_after": {
-            "en": "The parent rule is defined in a file that loads after {output}: add this rule to that file, after "
-            "the parent, or analysisd discards it.",
-            "es": "La regla padre está definida en un archivo que se carga después de {output}: añada esta regla a "
-            "ese archivo, después de la padre, o analysisd la descartará.",
+            "en": "The parent rule is defined in a file that loads after {output}: add this rule to that "
+            "file, after the parent, or analysisd discards it.",
+            "es": "La regla padre está definida en un archivo que se carga después de {output}: agregue esta "
+            "regla a ese archivo, después de la padre, o analysisd la descartará.",
         },
         "wazuh.validation.warnings_heading": {"en": "Warnings", "es": "Avisos"},
         "wazuh.validation.skipped_heading": {

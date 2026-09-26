@@ -816,7 +816,7 @@ def test_streaming_memory_is_bounded(tmp_path: Path) -> None:
     assert max(peaks.values()) < 16 * 1024 * 1024, peaks
 
 
-# ---- regressions (review) -------------------------------------------------------------------------------------
+# ---- regressions -------------------------------------------------------------------------------------
 
 
 def test_alert_files_named_archive_are_still_alerts(tmp_path: Path) -> None:

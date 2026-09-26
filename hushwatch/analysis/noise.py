@@ -2185,7 +2185,10 @@ register(
         "noise.scope.and": {"en": "{first} and {field} = {value}", "es": "{first} y {field} = {value}"},
         "noise.scope.fim": {"en": "the paths listed above", "es": "las rutas indicadas arriba"},
         "noise.n.alert": {"en": "{n} alert", "es": "{n} alerta"},
-        "noise.n.alerts": {"en": "{n} alerts", "es": "{n} alertas"},
+        "noise.n.alerts": {
+            "en": "{n} {n:plural:alert|alerts}",
+            "es": "{n} {n:plural:alerta|alertas}",
+        },
         # ---- titles ------------------------------------------------------------------------------------------
         "noise.title.tune": {
             "en": "Rule {rule} ({description}) can be safely demoted for {scope}",
@@ -2222,16 +2225,16 @@ register(
             "nivel alto: investigue",
         },
         "noise.title.investigate_high_public": {
-            "en": "Rule {rule} ({description}): activity on {scope}, mostly from the public address(es) {sources}, "
-            "is linked to high-level alerts: investigate",
-            "es": "Regla {rule} ({description}): la actividad en {scope}, sobre todo desde la(s) dirección(es) "
-            "pública(s) {sources}, está relacionada con alertas de nivel alto: investigue",
+            "en": "Rule {rule} ({description}): activity on {scope}, mostly from public addresses "
+            "({sources}), is linked to high-level alerts: investigate",
+            "es": "Regla {rule} ({description}): la actividad en {scope}, sobre todo desde direcciones "
+            "públicas ({sources}), está relacionada con alertas de nivel alto: investigue",
         },
         "noise.title.investigate_public": {
-            "en": "Rule {rule} ({description}) is noisy for {scope}, driven by the public address(es) {sources}: "
+            "en": "Rule {rule} ({description}) is noisy for {scope}, driven by public addresses ({sources}): "
             "investigate, do not tune",
-            "es": "La regla {rule} ({description}) es ruidosa para {scope}, por la(s) dirección(es) pública(s) "
-            "{sources}: investigue, no la ajuste",
+            "es": "La regla {rule} ({description}) es ruidosa para {scope} por direcciones públicas "
+            "({sources}): investigue, no la ajuste",
         },
         "noise.title.investigate_beacon": {
             "en": "Rule {rule} ({description}): {host} contacts the public address {beacon} at a steady interval, "
@@ -2245,10 +2248,11 @@ register(
             "configuración del agente",
         },
         "noise.title.fix_at_source.fim_paths": {
-            "en": "Rule {rule} ({description}): file-integrity noise from {count} recurring path(s) such as {paths} "
-            "on {hosts}; ignore them in agent.conf",
-            "es": "Regla {rule} ({description}): ruido de integridad de archivos de {count} ruta(s) recurrente(s) "
-            "como {paths} en {hosts}; ignórelas en agent.conf",
+            "en": "Rule {rule} ({description}): file-integrity noise from {count} recurring "
+            "{count:plural:path|paths} such as {paths} on {hosts}; ignore them in agent.conf",
+            "es": "Regla {rule} ({description}): ruido de integridad de archivos de {count} "
+            "{count:plural:ruta recurrente|rutas recurrentes} como {paths} en {hosts}; ignórelas en "
+            "agent.conf",
         },
         "noise.title.fix_at_source.fim_hosts": {
             "en": "Rule {rule} ({description}): file-integrity noise on {hosts}, spread over many paths",
@@ -2305,28 +2309,31 @@ register(
             "({volume})",
         },
         "noise.title.rule_burst": {
-            "en": "Rule {rule} ({description}) spiked to {peak} alerts on {day} ({factor:.1f}× its median): "
-            "investigate",
-            "es": "La regla {rule} ({description}) se disparó a {peak} alertas el {day} ({factor:.1f}× su "
-            "mediana): investigue",
+            "en": "Rule {rule} ({description}) spiked to {peak} {peak:plural:alert|alerts} on {day} "
+            "({factor:.1f}× its median): investigate",
+            "es": "La regla {rule} ({description}) se disparó a {peak} {peak:plural:alerta|alertas} el {day} "
+            "({factor:.1f}× su mediana): investigue",
         },
         "noise.title.learning": {
-            "en": "Noise analysis is still learning: {days} day(s) of data, at least {min} needed",
-            "es": "El análisis de ruido todavía está aprendiendo: {days} día(s) de datos, se necesitan al menos {min}",
+            "en": "Noise analysis is still learning: {days} {days:plural:day|days} of data, at least {min} needed",
+            "es": "El análisis de ruido todavía está aprendiendo: {days} {days:plural:día|días} de datos, se "
+            "necesitan al menos {min}",
         },
         "noise.title.not_backtested": {
-            "en": "{count} tuning candidate(s) were not backtested, so none is recommended",
-            "es": "{count} candidato(s) de ajuste no se pudieron verificar con el backtest, así que no se recomienda "
-            "ninguno",
+            "en": "{count} tuning {count:plural:candidate was|candidates were} not backtested, so none is recommended",
+            "es": "{count} {count:plural:candidato|candidatos} de ajuste no se {count:plural:pudo|pudieron} "
+            "verificar con el backtest, así que no se recomienda ninguno",
         },
         "noise.title.rules_cap": {
-            "en": "Noise analysis hit its cap of {cap} distinct rules; {dropped} alert(s) were not analyzed",
-            "es": "El análisis de ruido alcanzó su límite de {cap} reglas distintas; {dropped} alerta(s) no se "
-            "analizaron",
+            "en": "Noise analysis hit its cap of {cap} distinct rules; {dropped} {dropped:plural:alert "
+            "was|alerts were} not analyzed",
+            "es": "El análisis de ruido alcanzó su límite de {cap} reglas distintas; {dropped} "
+            "{dropped:plural:alerta no se analizó|alertas no se analizaron}",
         },
         "noise.title.dispositions_bad": {
-            "en": "Dispositions file: {bad} invalid row(s) were ignored",
-            "es": "Archivo de disposiciones: se ignoraron {bad} fila(s) no válidas",
+            "en": "Dispositions file: {bad} invalid {bad:plural:row was|rows were} ignored",
+            "es": "Archivo de disposiciones: se {bad:plural:ignoró|ignoraron} {bad} {bad:plural:fila no "
+            "válida|filas no válidas}",
         },
         # ---- reasons -----------------------------------------------------------------------------------------
         "noise.reason.pending_backtest": {
@@ -2334,10 +2341,10 @@ register(
             "es": "Superó todos los controles de seguridad; falta el backtest antes de poder ajustarla",
         },
         "noise.reason.not_backtested": {
-            "en": "{count} candidate(s) passed the safety gates, but the input could not be read a second time to "
-            "backtest them",
-            "es": "{count} candidato(s) superaron los controles de seguridad, pero la entrada no se pudo leer una "
-            "segunda vez para el backtest",
+            "en": "{count} {count:plural:candidate|candidates} passed the safety gates, but the input could "
+            "not be read a second time to backtest them",
+            "es": "{count} {count:plural:candidato superó|candidatos superaron} los controles de seguridad, "
+            "pero la entrada no se pudo leer una segunda vez para el backtest",
         },
         "noise.reason.backtest_error": {
             "en": "Backtest error: {error}",
@@ -2348,8 +2355,10 @@ register(
             "es": "{alerts} ({per_day}), {analyst} de ellas visibles para los analistas",
         },
         "noise.reason.fim_paths": {
-            "en": "{count} path(s) changed on most days since early in the window: {alerts} ({per_day})",
-            "es": "{count} ruta(s) cambiaron casi todos los días desde el comienzo de la ventana: {alerts} ({per_day})",
+            "en": "{count} {count:plural:path|paths} changed on most days since early in the window: {alerts} "
+            "({per_day})",
+            "es": "{count} {count:plural:ruta cambió|rutas cambiaron} casi todos los días desde el comienzo "
+            "de la ventana: {alerts} ({per_day})",
         },
         "noise.reason.nothing_to_gain.demoted": {
             "en": "Nothing to gain: rule level {level} is already at or below the demote level ({demote}), so a "
@@ -2380,19 +2389,21 @@ register(
             "informa como vencida (tuning.expired) cuando pasa. Pruébela con wazuh-logtest antes de desplegarla",
         },
         "noise.rec.tune_review": {
-            "en": "REVIEW REQUIRED: rule {rule} feeds the correlation rule(s) {dependents}. Demoting it for {scope} "
-            "(marked to expire on {expires}; Wazuh has no rule expiry, `hushwatch audit` enforces the date) may "
-            "make those rules stop counting the demoted events, even when the child rule copies the parent's "
-            "groups, so a multi-event detection (brute force, repeated failures) could miss activity in this "
-            "scope. Deploy it only after validating with wazuh-logtest that {dependents} still fire as expected, "
-            "or tune the correlation rule instead",
-            "es": "REQUIERE REVISIÓN: la regla {rule} alimenta la(s) regla(s) de correlación {dependents}. "
-            "Degradarla para {scope} (con vencimiento el {expires}; Wazuh no hace vencer reglas, `hushwatch audit` "
-            "controla la fecha) puede hacer que esas reglas dejen de contar los eventos degradados, aunque la regla "
-            "hija copie los grupos de la regla padre, y una detección de varios eventos (fuerza bruta, fallos "
-            "repetidos) podría pasar por alto actividad en este alcance. Despliéguela solo después de validar con "
-            "wazuh-logtest que {dependents} se siguen disparando como se espera, o ajuste la regla de correlación en "
-            "su lugar",
+            "en": "REVIEW REQUIRED: rule {rule} feeds correlation rules ({dependents}). Demoting it for "
+            "{scope} (marked to expire on {expires}; Wazuh has no rule expiry, `hushwatch audit` "
+            "enforces the date) may make those rules stop counting the demoted events, even when the "
+            "child rule copies the parent's groups, so a multi-event detection (brute force, repeated "
+            "failures) could miss activity in this scope. Deploy it only after validating with "
+            "wazuh-logtest that {dependents} still fire as expected, or tune the correlation rule "
+            "instead",
+            "es": "REQUIERE REVISIÓN: la regla {rule} alimenta reglas de correlación ({dependents}). "
+            "Degradarla para {scope} (con vencimiento el {expires}; Wazuh no hace vencer reglas, "
+            "`hushwatch audit` controla la fecha) puede hacer que esas reglas dejen de contar los "
+            "eventos degradados, aunque la regla hija copie los grupos de la regla padre, y una "
+            "detección de varios eventos (fuerza bruta, fallos repetidos) podría pasar por alto "
+            "actividad en este alcance. Despliéguela solo después de validar con wazuh-logtest que "
+            "{dependents} se siguen disparando como se espera, o ajuste la regla de correlación en su "
+            "lugar",
         },
         "noise.rec.tune_unverified": {
             "en": "REVIEW REQUIRED: the stock Wazuh ruleset was not loaded, so it was not verified whether "

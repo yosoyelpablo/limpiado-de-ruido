@@ -81,6 +81,26 @@ class _SafeFormatter(string.Formatter):
             return ("{" + field_name + "}", field_name)
         return (kwargs.get(field_name, "{" + field_name + "}"), field_name)
 
+    def format_field(self, value: Any, format_spec: str) -> Any:
+        # "{count:plural:alert|alerts}" -> the word that agrees with the number (never the number itself), so a
+        # template reads "1 alert" / "2 alerts" instead of "alert(s)". Any value is accepted: text that is not a
+        # number reads as plural, and a spec with a single form always gives that form.
+        if format_spec.startswith("plural:"):
+            forms = format_spec[len("plural:") :].split("|")
+            return forms[0] if _is_one(value) else forms[-1]
+        return super().format_field(value, format_spec)
+
+
+def _is_one(value: Any) -> bool:
+    number = value.value if isinstance(value, _LocalizedNumber) else value
+    if isinstance(number, bool):
+        return False
+    if isinstance(number, (int, float)):
+        return abs(number) == 1
+    if isinstance(number, str):
+        return number.strip() in ("1", "1.0", "1,0", "-1")
+    return False
+
 
 _FORMATTER = _SafeFormatter()
 

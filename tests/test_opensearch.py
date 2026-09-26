@@ -19,7 +19,7 @@ from hushwatch.net import RemoteError
 UTC = timezone.utc
 START = datetime(2026, 9, 20, tzinfo=UTC)
 END = datetime(2026, 9, 21, tzinfo=UTC)
-PASSWORD = "Idx-S3cret-not-real!"
+PASSWORD = "FAKE-test-indexer-password!"
 INDEX = "wazuh-alerts-*"
 OS_TAGLINE = "The OpenSearch Project: https://opensearch.org/"
 
@@ -876,7 +876,7 @@ def test_basic_auth_error_never_contains_password() -> None:
 
 
 def test_api_key_header_and_scrubbing() -> None:
-    key = "VnVhQ2ZHY0JDZGJrUW0tZTVhT3g6dWkybHAyYXhUTm1zeWFrdzl0dk5udw=="
+    key = "RkFLRS1rZXktaWQ6RkFLRS10ZXN0LWFwaS1rZXk="
     router = Router().on("GET", "/", respond(403, {"error": f"api key {key} lacks privileges"}))
     idx = client(router, username=None, password=None, api_key=key)
     idx.engine()  # 403 on GET / is tolerated

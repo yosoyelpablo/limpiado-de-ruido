@@ -691,43 +691,47 @@ def _clip(value: Any, depth: int) -> Any:
 register(
     {
         "noise.backtest.high": {
-            "en": "Backtest: would demote {count} alert(s) at level {level} or higher",
-            "es": "Backtest: degradaría {count} alerta(s) de nivel {level} o superior",
+            "en": "Backtest: would demote {count} {count:plural:alert|alerts} at level {level} or higher",
+            "es": "Backtest: degradaría {count} {count:plural:alerta|alertas} de nivel {level} o superior",
         },
         "noise.backtest.tp": {
-            "en": "Backtest: would demote {count} alert(s) confirmed as true positives",
-            "es": "Backtest: degradaría {count} alerta(s) confirmadas como verdaderos positivos",
+            "en": "Backtest: would demote {count} {count:plural:alert|alerts} confirmed as true positives",
+            "es": "Backtest: degradaría {count} {count:plural:alerta confirmada|alertas confirmadas} como "
+            "verdaderos positivos",
         },
         "noise.backtest.co_occurrence": {
-            "en": "Backtest: {count} alert(s) it would demote involve {entities}, also seen in alerts at level "
-            "{level} or higher within ±{window}",
-            "es": "Backtest: {count} alerta(s) que degradaría involucran a {entities}, que también aparece(n) en "
-            "alertas de nivel {level} o superior dentro de ±{window}",
+            "en": "Backtest: {count} {count:plural:alert|alerts} it would demote involve {entities}, also "
+            "seen in alerts at level {level} or higher within ±{window}",
+            "es": "Backtest: {count} {count:plural:alerta|alertas} que degradaría involucran a {entities}, "
+            "que también aparecen en alertas de nivel {level} o superior dentro de ±{window}",
         },
         "noise.backtest.beacon": {
-            "en": "Backtest: {count} alert(s) it would demote go to {entities}, public address(es) contacted at a "
-            "steady interval, like a beacon (command and control)",
-            "es": "Backtest: {count} alerta(s) que degradaría van hacia {entities}, dirección(es) pública(s) "
-            "contactada(s) a intervalos regulares, como un beacon (comando y control)",
+            "en": "Backtest: {count} {count:plural:alert|alerts} it would demote go to {entities}, public "
+            "addresses contacted at a steady interval, like a beacon (command and control)",
+            "es": "Backtest: {count} {count:plural:alerta|alertas} que degradaría van hacia {entities}: "
+            "direcciones públicas contactadas a intervalos regulares, como un beacon (comando y "
+            "control)",
         },
         "noise.backtest.sustained": {
-            "en": "Backtest: {count} alert(s) it would demote involve {entities}, public address(es) active for "
-            "many hours (a scan, brute force or spray from the Internet, or sustained traffic to it)",
-            "es": "Backtest: {count} alerta(s) que degradaría involucran a {entities}, dirección(es) pública(s) "
-            "activa(s) durante muchas horas (un escaneo, fuerza bruta o spray desde Internet, o tráfico sostenido "
-            "hacia Internet)",
+            "en": "Backtest: {count} {count:plural:alert|alerts} it would demote involve {entities}, public "
+            "addresses active for many hours (a scan, brute force or spray from the Internet, or "
+            "sustained traffic to it)",
+            "es": "Backtest: {count} {count:plural:alerta|alertas} que degradaría involucran a {entities}: "
+            "direcciones públicas activas durante muchas horas (un escaneo, fuerza bruta o spray desde "
+            "Internet, o tráfico sostenido hacia Internet)",
         },
         "noise.backtest.novel_actor": {
-            "en": "Backtest: {count} alert(s) it would demote come from {entities}, first seen late in the window: "
-            "new actors inside the scope are investigated, not tuned",
-            "es": "Backtest: {count} alerta(s) que degradaría provienen de {entities}, vistos por primera vez al "
-            "final de la ventana: los actores nuevos dentro del alcance se investigan, no se ajustan",
+            "en": "Backtest: {count} {count:plural:alert|alerts} it would demote come from {entities}, first "
+            "seen late in the window: new actors inside the scope are investigated, not tuned",
+            "es": "Backtest: {count} {count:plural:alerta|alertas} que degradaría provienen de {entities}, "
+            "vistos por primera vez al final de la ventana: los actores nuevos dentro del alcance se "
+            "investigan, no se ajustan",
         },
         "noise.backtest.unknown_level": {
-            "en": "Backtest: would demote {count} alert(s) whose level is unknown (they may be level {level} or "
-            "higher)",
-            "es": "Backtest: degradaría {count} alerta(s) de nivel desconocido (podrían ser de nivel {level} o "
-            "superior)",
+            "en": "Backtest: would demote {count} {count:plural:alert|alerts} whose level is unknown (they "
+            "may be level {level} or higher)",
+            "es": "Backtest: degradaría {count} {count:plural:alerta|alertas} de nivel desconocido (podrían "
+            "ser de nivel {level} o superior)",
         },
         "noise.backtest.actors_truncated": {
             "en": "Backtest: the scope holds more than {max} distinct actors, so new actors inside it cannot be "
@@ -736,11 +740,12 @@ register(
             "actores nuevos dentro de él",
         },
         "noise.backtest.novel_host": {
-            "en": "Backtest: {count} alert(s) it would demote are on {entities}, first seen in this scope late in "
-            "the window: a known identity reaching a new host is investigated, not tuned",
-            "es": "Backtest: {count} alerta(s) que degradaría están en {entities}, vistos por primera vez en este "
-            "alcance al final de la ventana: una identidad conocida que llega a un equipo nuevo se investiga, no se "
-            "ajusta",
+            "en": "Backtest: {count} {count:plural:alert|alerts} it would demote are on {entities}, first "
+            "seen in this scope late in the window: a known identity reaching a new host is "
+            "investigated, not tuned",
+            "es": "Backtest: {count} {count:plural:alerta|alertas} que degradaría están en {entities}, vistos "
+            "por primera vez en este alcance al final de la ventana: una identidad conocida que llega a "
+            "un equipo nuevo se investiga, no se ajusta",
         },
         "noise.backtest.hosts_truncated": {
             "en": "Backtest: the scope reaches more than {max} hosts, so new hosts inside it cannot be ruled out",
@@ -754,16 +759,18 @@ register(
             "de direcciones públicas: restrinja la exposición en el origen en lugar de silenciarlas",
         },
         "noise.backtest.burst": {
-            "en": "Backtest: {peak} alerts it would demote on {day}, {factor:.1f}× the median of {median:.1f} per "
-            "day (limit {limit:.1f}×)",
-            "es": "Backtest: {peak} alertas que degradaría el {day}, {factor:.1f}× la mediana de {median:.1f} por "
-            "día (límite {limit:.1f}×)",
+            "en": "Backtest: {peak} {peak:plural:alert|alerts} it would demote on {day}, {factor:.1f}× the "
+            "median of {median:.1f} per day (limit {limit:.1f}×)",
+            "es": "Backtest: {peak} {peak:plural:alerta|alertas} que degradaría el {day}, {factor:.1f}× la "
+            "mediana de {median:.1f} por día (límite {limit:.1f}×)",
         },
         "noise.backtest.clean": {
-            "en": "Backtest: would demote {hidden} alerts ({per_day}, {share} of the rule; {analyst} analyst-facing) "
-            "on {agents} agent(s); none at level {level} or higher and no true positives",
-            "es": "Backtest: degradaría {hidden} alertas ({per_day}, {share} de la regla; {analyst} visibles para "
-            "analistas) en {agents} agente(s); ninguna de nivel {level} o superior y ningún verdadero positivo",
+            "en": "Backtest: would demote {hidden} {hidden:plural:alert|alerts} ({per_day}, {share} of the "
+            "rule; {analyst} analyst-facing) on {agents} {agents:plural:agent|agents}; none at level "
+            "{level} or higher and no true positives",
+            "es": "Backtest: degradaría {hidden} {hidden:plural:alerta|alertas} ({per_day}, {share} de la "
+            "regla; {analyst} visibles para analistas) en {agents} {agents:plural:agente|agentes}; "
+            "ninguna de nivel {level} o superior y ningún verdadero positivo",
         },
         "noise.backtest.empty": {
             "en": "Backtest: the condition matched no alert on the second pass (the input changed?); nothing to tune",

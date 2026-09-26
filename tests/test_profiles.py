@@ -607,7 +607,7 @@ def test_unwrap_hit_requires_hit_markers() -> None:
     assert unwrap_hit({"_id": "x", "_source": {"a": 1, "_id": "inner"}})["_id"] == "inner"
 
 
-# ---- regressions (review) -------------------------------------------------------------------------------------
+# ---- regressions -------------------------------------------------------------------------------------
 
 
 def test_elastic7_siem_signal_is_an_alert() -> None:

@@ -1,4 +1,4 @@
-"""F1 regression tests (system review): configuration loading, the state directory and lifecycle, redaction keys,
+"""Regression tests: configuration loading, the state directory and lifecycle, redaction keys,
 heartbeats and notification failure reporting. Synthetic data only."""
 
 from __future__ import annotations
@@ -144,13 +144,13 @@ tenants:
         url: https://idx.example:9200
         username: reader
         password: "${IDX_PASSWORD}"
-      - {type: indexer, url: "https://idx2.example:9200", password: RealLiteralPassw0rd}
+      - {type: indexer, url: "https://idx2.example:9200", password: FAKE-literal-password}
     notify:
-      - {type: slack, url: "https://hooks.slack.com/services/T0/B0/XXXXXXXXXXXXXXXX"}
+      - {type: slack, url: "https://hooks.slack.example/services/FAKE/FAKE/FAKE-webhook-path"}
       - {type: webhook, url: "https://hooks.example/hushwatch"}
       - type: webhook
         url: "${HOOK}"
-        headers: {Authorization: "Bearer abcdef0123456789", X-Env: "${TAG}"}
+        headers: {Authorization: "Bearer FAKE-test-token", X-Env: "${TAG}"}
 """
     loose = _write(tmp_path / "loose.yml", text, 0o644)
     env = {"IDX_PASSWORD": "x", "HOOK": "https://h.example/x", "TAG": "t"}
@@ -162,7 +162,7 @@ tenants:
         "tenants.acme.notify[2].headers.Authorization",
     ]
     shown = str(caught[0].message)
-    assert "RealLiteralPassw0rd" not in shown and "XXXXXXXX" not in shown and "Bearer" not in shown
+    assert "FAKE-literal-password" not in shown and "FAKE-webhook-path" not in shown and "Bearer" not in shown
     private = _write(tmp_path / "private.yml", text, 0o600)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -189,13 +189,13 @@ def test_yaml_alias_bombs_are_refused_quickly(tmp_path: Path) -> None:
 def test_yaml_errors_give_the_position_never_the_text(tmp_path: Path) -> None:
     bad = _write(
         tmp_path / "bad.yml",
-        'tenants:\n  acme:\n    notify:\n      - url: "https://hooks.slack.com/services/T0/B0/SUPERSECRETTOKEN\n'
+        'tenants:\n  acme:\n    notify:\n      - url: "https://hooks.slack.example/services/FAKE/FAKE/FAKE-webhook-path\n'
         "    bad: [\n",
     )
     with pytest.raises(ConfigError) as caught:
         load_config(bad, environ={})
     message = str(caught.value)
-    assert "SUPERSECRETTOKEN" not in message and "hooks.slack" not in message
+    assert "FAKE-webhook-path" not in message and "hooks.slack" not in message
     assert "line" in message and "column" in message and "<unicode string>" not in message
 
 
@@ -349,7 +349,7 @@ def test_heartbeat_status_says_when_critical_findings_are_open() -> None:
     loud = build_heartbeat(TENANT, now=T0, ok=True, counts={"open": 3, "open.critical": 2})
     assert loud["ok"] is True and loud["status"] == "critical" and "2 critical" in loud["summary"]
     assert (
-        "2 hallazgo(s) crítico(s)"
+        "2 hallazgos críticos abiertos"
         in build_heartbeat(TENANT, now=T0, ok=True, counts={"open.critical": 2}, lang="es")["summary"]
     )
     failed = build_heartbeat(TENANT, now=T0, ok=False, detail="input not found", counts={"open.critical": 2})

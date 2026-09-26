@@ -190,7 +190,7 @@ def build_document(ctx: RenderContext, report: Report) -> dict[str, Any]:
             "future_timestamps": conv.value(basis.future_timestamps),
             "sampled": bool(basis.sampled),
             "truncated": bool(basis.truncated),
-            "partial_failures": [ctx.text(p) for p in _seq(basis.partial_failures)],
+            "partial_failures": [conv.message(p) for p in _seq(basis.partial_failures)],
             "warnings": [conv.message(w) for w in _seq(basis.warnings)],
             "not_evaluated": [ctx.text(n) for n in _seq(basis.not_evaluated)],
             "complete": basis_complete(basis),

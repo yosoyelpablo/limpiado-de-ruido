@@ -11,7 +11,7 @@ Data:
 Isolation: ``HUSHWATCH_CONFIG`` / ``HUSHWATCH_REDACT_KEY`` are removed and the default state directory is
 redirected to a temporary directory, so nothing touches ``~/.local/state``.
 
-Every documented CLI/engine bug found by the system review has a regression test here (no xfail left).
+Every documented CLI/engine bug has a regression test here (no xfail left).
 """
 
 from __future__ import annotations
@@ -681,10 +681,10 @@ def test_silence(demo: DemoManifest, demo_config: Path, tmp_path: Path) -> None:
 
 
 _SUMMARY = re.compile(
-    r"(?P<tenant>\S+): (?P<findings>\d+) finding\(s\), (?P<opened>\d+) opened, (?P<resolved>\d+) resolved, "
-    r"(?:(?P<delivered>\d+) of (?P<sent>\d+) notification\(s\) delivered"
-    r"|(?P<dry>\d+) notification\(s\) not sent \(dry run: the next run sends them\)"
-    r"|(?P<none>\d+) change\(s\), no notification target configured)"
+    r"(?P<tenant>\S+): (?P<findings>\d+) findings?, (?P<opened>\d+) opened, (?P<resolved>\d+) resolved, "
+    r"(?:(?P<delivered>\d+) of (?P<sent>\d+) notifications? delivered"
+    r"|(?P<dry>\d+) notifications? not sent \(dry run: the next run sends them\)"
+    r"|(?P<none>\d+) changes?, no notification target configured)"
 )
 
 
@@ -911,7 +911,7 @@ def test_doctor_with_the_demo_config(demo: DemoManifest, monkeypatch: pytest.Mon
     assert any("file input" in r and " OK " in r and "wazuh4" in r for r in rows), rows
     assert any("ruleset" in r and " OK " in r for r in rows), rows
     assert any("state dir" in r and " OK " in r for r in rows), rows
-    assert re.search(r"\d+ check\(s\): 0 failed", out)
+    assert re.search(r"\d+ checks?: 0 failed", out)
 
 
 def test_doctor_resolves_config_relative_paths_from_any_directory(
@@ -922,7 +922,7 @@ def test_doctor_resolves_config_relative_paths_from_any_directory(
     assert result.exit_code == 0, result.stdout
     out = text(result.stdout)
     assert str(demo.alerts_path) in out.replace("\n", "")  # shown resolved (absolute)
-    assert re.search(r"\d+ check\(s\): 0 failed", out)
+    assert re.search(r"\d+ checks?: 0 failed", out)
 
 
 def test_doctor_fails_when_an_input_is_not_reachable(tmp_path: Path) -> None:
@@ -932,7 +932,7 @@ def test_doctor_fails_when_an_input_is_not_reachable(tmp_path: Path) -> None:
     out = text(result.stdout)
     assert any("file input" in line and "FAIL" in line for line in out.splitlines())
     assert "not found" in out
-    assert re.search(r"\d+ check\(s\): [1-9]\d* failed", out)
+    assert re.search(r"\d+ checks?: [1-9]\d* failed", out)
 
 
 def test_doctor_config_permissions(demo_config: Path) -> None:
